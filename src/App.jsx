@@ -35,7 +35,7 @@ function playTone(type) {
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
       osc.start(); osc.stop(ctx.currentTime + 0.1);
     }
-  } catch {}
+  } catch { /* audio not supported */ }
 }
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
@@ -175,10 +175,10 @@ function loadSession() {
   try { const r = localStorage.getItem(SESSION_KEY); return r ? JSON.parse(r) : null; } catch { return null; }
 }
 function saveSession(data) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch { /* storage full */ }
 }
 function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch {}
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable */ }
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
@@ -294,6 +294,15 @@ function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
   const [order,     setOrder]     = useState("");
   const [file,      setFile]      = useState(null);
   const [manual,    setManual]    = useState(!hasQueue);
+
+  // If assignments arrive after the modal mounts (heartbeat fires ~1s later),
+  // switch from manual mode to the picker automatically
+  useEffect(() => {
+    if (assignments.length === 0) return;
+    setManual(false);
+    if (assignments.length === 1 && selIdx === -1) setSelIdx(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignments.length]);
   const [error,     setError]     = useState(null);
   const [loading,   setLoading]   = useState(false);
   const fileRef = useRef(null);
@@ -384,7 +393,7 @@ function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
 
         {error && <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12, padding: "8px 12px", background: "rgba(239,68,68,0.08)", borderRadius: 6 }}>{error}</div>}
 
-        <button onClick={handleStart} disabled={loading}
+        <button onClick={handleStart} disabled={loading || (useManual && /\.(xlsx|xls)$/i.test(file?.name || "") && !xlsxReady)}
           style={{ width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: loading ? "wait" : "pointer", opacity: loading ? 0.7 : 1 }}>
           {loading ? "Loading…" : "Start Session →"}
         </button>
@@ -419,7 +428,7 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
   useEffect(() => {
     if (state.candidates) {
       const firstUnscanned = state.candidates.findIndex(c => !c.scanned || c.scanned === false);
-      setSelectedIdx(firstUnscanned >= 0 ? firstUnscanned : 0);
+      setSelectedIdx(firstUnscanned >= 0 ? firstUnscanned : 0); // eslint-disable-line react-hooks/set-state-in-effect
     } else {
       setSelectedIdx(0);
     }
@@ -744,7 +753,7 @@ function BinSetupModal({ binMap, onConfirm }) {
 }
 
 // ── Roster complete modal ─────────────────────────────────────────────────────
-function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismiss, onNewOrder }) {
+function RosterCompleteModal({ roster, flagCount, onExport, onDismiss, onNewOrder }) {
   const extraCount = roster.filter(r => r._extra).length;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -813,7 +822,6 @@ function AdminPanel({ onClose }) {
   const [stations,    setStations]    = useState([]);
   const [exports,     setExports]     = useState([]);
   const [packGroups,  setPackGroups]  = useState([]);
-  const [busy,        setBusy]        = useState(false);
   const [msg,         setMsg]         = useState(null);
 
   const ah = { 'Content-Type': 'application/json', 'x-admin-password': password };
@@ -841,14 +849,14 @@ function AdminPanel({ onClose }) {
         fetch('/api/admin/packgroups', { headers: h }).then(r => r.json()),
       ]);
       setStations(st); setExports(ex); setPackGroups(pg);
-    } catch {}
+    } catch (e) { console.warn('loadAll failed', e.message); }
   };
 
   useEffect(() => {
     if (!authed) return;
     const t = setInterval(() => loadAll(), 5000);
     return () => clearInterval(t);
-  }, [authed]);
+  }, [authed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const flash = (m) => { setMsg(m); setTimeout(() => setMsg(null), 3000); };
 
@@ -915,6 +923,7 @@ function AdminPanel({ onClose }) {
 }
 
 function AdminDashboard({ stations, packGroups, onRefresh }) {
+  // eslint-disable-next-line react-hooks/purity
   const now = Date.now();
   const sorted = [...stations].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   if (sorted.length === 0) return (
@@ -1075,7 +1084,6 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
   const [detail,    setDetail]    = useState(null);
   const [pgName,    setPgName]    = useState("");
   const [file,      setFile]      = useState(null);
-  const [parsed,    setParsed]    = useState(null);
   const [binDraft,  setBinDraft]  = useState({});
   const [error,     setError]     = useState(null);
   const [loading,   setLoading]   = useState(false);
@@ -1090,7 +1098,7 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
     try {
       const isExcel = /\.(xlsx|xls)$/i.test(f.name);
       const rows = isExcel ? await parseExcel(f) : parseCSV(await f.text());
-      setFile(f); setParsed(rows);
+      setFile(f);
       const teams = [...new Set(rows.map(r => r.team).filter(Boolean))].sort();
       const draft = {};
       teams.forEach((t, i) => { draft[t] = i + 1; });
@@ -1104,7 +1112,7 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
     setLoading(true);
     try {
       await api('/api/admin/packgroups', { method: 'POST', body: JSON.stringify({ name: pgName.trim(), binMap: binDraft }) });
-      onDone(); setView("list"); setPgName(""); setFile(null); setParsed(null); setBinDraft({});
+      onDone(); setView("list"); setPgName(""); setFile(null); setBinDraft({});
     } catch (err) { setError(err.message); }
     setLoading(false);
   };
@@ -1113,7 +1121,7 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
     try {
       const d = await fetch(`/api/admin/packgroups/${pg.id}`, { headers: { 'x-admin-password': password } }).then(r => r.json());
       setDetail(d); setView("detail");
-    } catch {}
+    } catch (e) { console.warn('openDetail failed', e.message); }
   };
 
   const downloadCombined = async (pg) => {
@@ -1345,7 +1353,7 @@ export default function App() {
           body: JSON.stringify({ stationId: stationName, stationName, progress: null }) });
         const { assigned } = await r.json();
         if (assigned) setPreAssigned(assigned);
-      } catch {}
+      } catch { /* network error — silent */ }
     };
     beat();
     const t = setInterval(beat, 15000);
@@ -1355,7 +1363,8 @@ export default function App() {
   // Persist session to localStorage on every state change
   useEffect(() => {
     if (!sessionStarted) return;
-    saveSession({ sessionStarted, roster, log: log.map(({ thumb, ...rest }) => rest), orderNumber, operatorName, rosterFile, binMap, firstScanTime, packGroupId });
+    const stripThumb = ({ thumb, ...rest }) => rest; // eslint-disable-line no-unused-vars
+    saveSession({ sessionStarted, roster, log: log.map(stripThumb), orderNumber, operatorName, rosterFile, binMap, firstScanTime, packGroupId });
   }, [sessionStarted, roster, log, orderNumber, operatorName, rosterFile, binMap, firstScanTime, packGroupId]);
 
   // Report progress to server — debounced so rapid scan confirmations batch into one call
@@ -1371,7 +1380,7 @@ export default function App() {
       }).catch(() => {});
     }, 2000);
     return () => clearTimeout(heartbeatTimer.current);
-  }, [sessionStarted, stationName, roster, log, orderNumber, packGroupId]);
+  }, [sessionStarted, stationName, roster, log, orderNumber, operatorName, packGroupId]);
 
 
   useEffect(() => {
@@ -1446,8 +1455,9 @@ export default function App() {
   const handleExportAndSave = useCallback((r, oNum, oName, bMap, pgId) => {
     exportRosterXLSX(r, oNum, oName, bMap);
     if (!stationName) return;
+    const strip = ({ thumb, ...rest }) => rest; // eslint-disable-line no-unused-vars
     fetch('/api/station/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stationId: stationName, stationName, orderNumber: oNum, operatorName: oName, roster: r.map(({ thumb, ...rest }) => rest), log: log.map(({ thumb, ...rest }) => rest), binMap: bMap, packGroupId: pgId || null, completedAt: new Date().toISOString() }),
+      body: JSON.stringify({ stationId: stationName, stationName, orderNumber: oNum, operatorName: oName, roster: r.map(strip), log: log.map(strip), binMap: bMap, packGroupId: pgId || null, completedAt: new Date().toISOString() }),
     }).catch(() => {});
   }, [stationName, log]);
 
