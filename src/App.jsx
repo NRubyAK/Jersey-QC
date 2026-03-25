@@ -1576,12 +1576,18 @@ export default function App() {
 
   const handleExtraJersey = useCallback(() => {
     if (!overlay?.scan) return;
-    const det = overlay.scan.detected;
+    const det   = overlay.scan.detected;
+    const match = overlay.scan.match; // set if operator picked/confirmed a specific entry
     // Build a row with the same column shape as existing roster entries (blank for unknown fields)
     const baseShape = roster[0]
       ? Object.fromEntries(Object.keys(roster[0]).filter(k => k !== '_id' && k !== '_extra').map(k => [k, ""]))
       : {};
-    const newEntry = { ...baseShape, _id: Date.now(), _extra: true, name: det.name || "", number: det.number || "", scanned: S_EXTRA, comment: "" };
+    // Use the operator-confirmed identity when available; fall back to AI detection
+    const name   = match ? (match.name   || "") : (det.name   || "");
+    const number = match ? (match.number || "") : (det.number || "");
+    const team   = match ? (match.team   || "") : "";
+    const size   = match ? (match.size   || "") : "";
+    const newEntry = { ...baseShape, _id: Date.now(), _extra: true, name, number, team, size, scanned: S_EXTRA, comment: "" };
     const logEntry = { id: Date.now() + 1, status: S_EXTRA, detected: det, match: newEntry, timestamp: new Date().toLocaleTimeString(), reason: "Extra jersey — not in roster" };
     setRoster(prev => [...prev, newEntry]);
     setLog(prev => [logEntry, ...prev]);
