@@ -167,37 +167,57 @@ function findMatches(roster, name, number) {
   return { type: "none" };
 }
 
+// ── Session persistence ────────────────────────────────────────────────────────
+const SESSION_KEY = "jerseyqc_session";
+function loadSession() {
+  try { const r = localStorage.getItem(SESSION_KEY); return r ? JSON.parse(r) : null; } catch { return null; }
+}
+function saveSession(data) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch {}
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
-function exportRosterXLSX(roster, orderNumber, operatorName) {
+function exportRosterXLSX(roster, orderNumber, operatorName, binMap) {
   if (!window.XLSX) { alert("Excel library not loaded yet, please try again."); return; }
-  const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned");
+  const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned" && k !== "comment");
+  const hasBins = binMap && Object.keys(binMap).length > 0;
   const data = [
     ["Order Number", orderNumber  || "—"],
     ["Operator",     operatorName || "—"],
     ["Export Date",  new Date().toLocaleString()],
     [],
-    ["Status", ...cols.map(c => c.charAt(0).toUpperCase() + c.slice(1))],
-    ...roster.map(r => {
-      const s = r.scanned === "pass"     ? "PASS"
-              : r.scanned === "flag"     ? "FLAGGED"
-              : r.scanned === "resolved" ? "RESOLVED"
-              : "NOT SCANNED";
-      return [s, ...cols.map(c => r[c])];
-    }),
   ];
+  if (hasBins) {
+    data.push(["Bin Assignments"]);
+    data.push(["Bin", "Team"]);
+    Object.entries(binMap).sort((a, b) => a[1] - b[1]).forEach(([team, bin]) => data.push([`Bin ${bin}`, team]));
+    data.push([]);
+  }
+  data.push(["Status", ...cols.map(c => c.charAt(0).toUpperCase() + c.slice(1)), ...(hasBins ? ["Bin"] : []), "Comment"]);
+  roster.forEach(r => {
+    const s = r.scanned === "pass"     ? "PASS"
+            : r.scanned === "flag"     ? "FLAGGED"
+            : r.scanned === "resolved" ? "RESOLVED"
+            : "NOT SCANNED";
+    data.push([s, ...cols.map(c => r[c]), ...(hasBins ? [r.team && binMap[r.team] ? `Bin ${binMap[r.team]}` : ""] : []), r.comment || ""]);
+  });
   const ws = window.XLSX.utils.aoa_to_sheet(data);
   const wb = window.XLSX.utils.book_new();
   window.XLSX.utils.book_append_sheet(wb, ws, "QC Results");
   window.XLSX.writeFile(wb, `roster_${orderNumber ? orderNumber + "_" : ""}${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
-function exportLogCSV(log, orderNumber) {
-  const header = "Time,Status,Detected Name,Detected Number,Matched Name,Matched Number,Team,Size,Notes";
+function exportLogCSV(log, orderNumber, binMap) {
+  const header = "Time,Status,Detected Name,Detected Number,Matched Name,Matched Number,Team,Size,Bin,Notes";
   const rows   = log.map(l => [
     l.timestamp, l.status,
     l.detected?.name   || "", l.detected?.number || "",
     l.match?.name      || "", l.match?.number    || "",
     l.match?.team      || "", l.match?.size      || "",
+    (binMap && l.match?.team && binMap[l.match.team]) ? `Bin ${binMap[l.match.team]}` : "",
     l.reason || l.resolution || "",
   ].join(","));
   const a = document.createElement("a");
@@ -246,7 +266,7 @@ function Pill({ color, children }) {
 
 function OverlayBtn({ color, outline, onClick, children }) {
   return (
-    <button onClick={onClick} style={{ padding: "12px 24px", borderRadius: 12, border: `2px solid ${color}`, background: outline ? "transparent" : color, color: outline ? color : "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}>
+    <button onClick={onClick} style={{ padding: "16px 32px", borderRadius: 14, border: `3px solid ${color}`, background: outline ? "transparent" : color, color: outline ? color : "#fff", fontWeight: 800, fontSize: 22, cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
       {children}
     </button>
   );
@@ -254,7 +274,7 @@ function OverlayBtn({ color, outline, onClick, children }) {
 
 function Kbd({ light, children }) {
   return (
-    <kbd style={{ background: light ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.2)", padding: "2px 7px", borderRadius: 5, fontSize: 12, fontFamily: "monospace" }}>
+    <kbd style={{ background: light ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.3)", border: "2px solid rgba(255,255,255,0.35)", padding: "3px 10px", borderRadius: 6, fontSize: 18, fontFamily: "monospace", fontWeight: 700 }}>
       {children}
     </kbd>
   );
@@ -447,35 +467,35 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
       {/* ── GREEN ── */}
       {(isConfirm || isDone) && match && (
         <>
-          <div style={{ fontSize: 100, lineHeight: 1, marginBottom: 4 }}>✅</div>
-          <div style={{ fontSize: 88, fontWeight: 900, color: accent, letterSpacing: "-4px", textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>
+          <div style={{ fontSize: 120, lineHeight: 1, marginBottom: 4 }}>✅</div>
+          <div style={{ fontSize: 96, fontWeight: 900, color: accent, letterSpacing: "-4px", textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>
             #{match.number}{match.name ? ` · ${match.name}` : ""}
           </div>
           {match.team && (
-            <div style={{ fontSize: 42, color: "#86efac", marginTop: 8, fontWeight: 700, textAlign: "center" }}>{match.team}</div>
+            <div style={{ fontSize: 52, color: "#86efac", marginTop: 10, fontWeight: 700, textAlign: "center" }}>{match.team}</div>
           )}
-          <div style={{ display: "flex", gap: 16, marginTop: 16, flexWrap: "wrap", justifyContent: "center" }}>
+          <div style={{ display: "flex", gap: 20, marginTop: 20, flexWrap: "wrap", justifyContent: "center" }}>
             {hasSize && (
-              <div style={{ padding: "14px 48px", borderRadius: 20, border: "4px solid #22c55e", background: "rgba(34,197,94,0.12)", textAlign: "center", minWidth: 180 }}>
-                <div style={{ fontSize: 18, color: "#86efac", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Size</div>
-                <div style={{ fontSize: 96, fontWeight: 900, color: "#fff", letterSpacing: 6, lineHeight: 1 }}>{match.size}</div>
+              <div style={{ padding: "18px 56px", borderRadius: 20, border: "4px solid #22c55e", background: "rgba(34,197,94,0.12)", textAlign: "center", minWidth: 200 }}>
+                <div style={{ fontSize: 22, color: "#86efac", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Size</div>
+                <div style={{ fontSize: 108, fontWeight: 900, color: "#fff", letterSpacing: 6, lineHeight: 1 }}>{match.size}</div>
               </div>
             )}
             {binNum !== null && (
-              <div style={{ padding: "14px 48px", borderRadius: 20, border: "4px solid #3b82f6", background: "rgba(59,130,246,0.12)", textAlign: "center", minWidth: 180 }}>
-                <div style={{ fontSize: 18, color: "#93c5fd", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Bin</div>
-                <div style={{ fontSize: 96, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{binNum}</div>
+              <div style={{ padding: "18px 56px", borderRadius: 20, border: "4px solid #3b82f6", background: "rgba(59,130,246,0.12)", textAlign: "center", minWidth: 200 }}>
+                <div style={{ fontSize: 22, color: "#93c5fd", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Bin</div>
+                <div style={{ fontSize: 108, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{binNum}</div>
               </div>
             )}
           </div>
           {isConfirm && (
-            <div style={{ marginTop: 28, display: "flex", gap: 20 }}>
+            <div style={{ marginTop: 32, display: "flex", gap: 24 }}>
               <OverlayBtn color="#22c55e" onClick={onConfirm}>✓ Confirm <Kbd>{formatKey(confirmKey)}</Kbd></OverlayBtn>
               <OverlayBtn color="#94a3b8" outline onClick={onEdit}>✎ Edit <Kbd light>{formatKey(cancelKey)}</Kbd></OverlayBtn>
             </div>
           )}
           {isDone && (
-            <div style={{ fontSize: 28, color: "#4ade80", marginTop: 20, opacity: 0.8 }}>Scanning next jersey…</div>
+            <div style={{ fontSize: 34, color: "#4ade80", marginTop: 24, opacity: 0.9, fontWeight: 700 }}>Scanning next jersey…</div>
           )}
         </>
       )}
@@ -483,14 +503,14 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
       {/* ── YELLOW ── */}
       {(isPick || isClose) && (
         <>
-          <div style={{ fontSize: 64, lineHeight: 1, marginBottom: 4 }}>{isPick ? "⚠️" : "🔍"}</div>
-          <div style={{ fontSize: 52, fontWeight: 900, color: accent, marginBottom: 8, textAlign: "center", padding: "0 24px", lineHeight: 1.1 }}>
+          <div style={{ fontSize: 80, lineHeight: 1, marginBottom: 4 }}>{isPick ? "⚠️" : "🔍"}</div>
+          <div style={{ fontSize: 72, fontWeight: 900, color: accent, marginBottom: 10, textAlign: "center", padding: "0 24px", lineHeight: 1.1 }}>
             {isPick ? "Select correct player" : "Close match — confirm or flag"}
           </div>
-          <div style={{ fontSize: 28, color: "#fcd34d", marginBottom: 16, opacity: 0.9, textAlign: "center" }}>
+          <div style={{ fontSize: 40, color: "#fcd34d", marginBottom: 20, fontWeight: 700, textAlign: "center" }}>
             Detected: #{state.scan?.detected?.number || "?"}{state.scan?.detected?.name ? ` · ${state.scan.detected.name}` : ""}
           </div>
-          <div style={{ width: "100%", maxWidth: 700, padding: "0 24px", boxSizing: "border-box", maxHeight: "45vh", overflowY: "auto" }}>
+          <div style={{ width: "100%", maxWidth: 900, padding: "0 24px", boxSizing: "border-box", maxHeight: "45vh", overflowY: "auto" }}>
             {state.candidates?.map((c, i) => {
               const isScanned  = c.scanned && c.scanned !== false;
               const isSelected = i === selectedIdx;
@@ -498,18 +518,18 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
                 <div key={c._id}
                   onClick={() => { if (!isScanned) onPickCandidate(c); }}
                   onMouseEnter={() => { if (!isScanned) setSelectedIdx(i); }}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 22px", marginBottom: 10, borderRadius: 14, border: `3px solid ${isScanned ? "rgba(255,255,255,0.08)" : isSelected ? accent : "rgba(255,255,255,0.12)"}`, background: isScanned ? "rgba(255,255,255,0.02)" : isSelected ? "rgba(245,158,11,0.18)" : "rgba(255,255,255,0.04)", cursor: isScanned ? "default" : "pointer", opacity: isScanned ? 0.45 : 1 }}>
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "22px 32px", marginBottom: 14, borderRadius: 16, border: `4px solid ${isScanned ? "rgba(255,255,255,0.08)" : isSelected ? accent : "rgba(255,255,255,0.2)"}`, background: isScanned ? "rgba(255,255,255,0.02)" : isSelected ? "rgba(245,158,11,0.22)" : "rgba(255,255,255,0.06)", cursor: isScanned ? "default" : "pointer", opacity: isScanned ? 0.4 : 1 }}>
                   <div>
-                    <span style={{ fontSize: 28, fontWeight: 900, color: isScanned ? "#64748b" : "#fff" }}>#{c.number}{c.name ? ` · ${c.name}` : ""}</span>
-                    <span style={{ fontSize: 18, color: "#64748b", marginLeft: 14 }}>{[c.team, c.size].filter(Boolean).join(" · ")}</span>
-                    {isScanned && <span style={{ fontSize: 14, color: "#22c55e", marginLeft: 12, fontWeight: 700 }}>✓ Already scanned</span>}
+                    <div style={{ fontSize: 48, fontWeight: 900, color: isScanned ? "#64748b" : "#fff", lineHeight: 1.1 }}>#{c.number}{c.name ? ` · ${c.name}` : ""}</div>
+                    <div style={{ fontSize: 28, color: isSelected ? "#fcd34d" : "#94a3b8", marginTop: 4, fontWeight: 600 }}>{[c.team, c.size].filter(Boolean).join(" · ")}</div>
+                    {isScanned && <div style={{ fontSize: 20, color: "#22c55e", marginTop: 4, fontWeight: 700 }}>✓ Already scanned</div>}
                   </div>
-                  {!isScanned && isSelected && <span style={{ fontSize: 18, color: accent, fontWeight: 700 }}>← {formatKey(confirmKey)}</span>}
+                  {!isScanned && isSelected && <span style={{ fontSize: 32, color: accent, fontWeight: 900 }}>← {formatKey(confirmKey)}</span>}
                 </div>
               );
             })}
           </div>
-          <div style={{ marginTop: 16, display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
+          <div style={{ marginTop: 20, display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
             {isClose && (
               <OverlayBtn color="#3b82f6" outline onClick={() => { const c = state.candidates?.[selectedIdx]; if (c) onFlagBadJersey(c); }}>
                 ✓ Bad scan, correct jersey <Kbd light>Enter</Kbd>
@@ -519,7 +539,7 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
               🚩 Bad jersey <Kbd light>double {formatKey(cancelKey)}</Kbd>
             </OverlayBtn>
           </div>
-          <div style={{ marginTop: 12, fontSize: 14, color: "rgba(255,255,255,0.3)", textAlign: "center" }}>
+          <div style={{ marginTop: 14, fontSize: 18, color: "rgba(255,255,255,0.6)", textAlign: "center", fontWeight: 600 }}>
             {formatKey(confirmKey)} select · {formatKey(cancelKey)} navigate · double {formatKey(cancelKey)} flag bad jersey
           </div>
         </>
@@ -727,12 +747,13 @@ export default function App() {
   const streamRef = useRef(null);
   const rosterRef = useRef(null);
   const photoRef  = useRef(null);
+  const _s        = useRef(loadSession()).current;
 
-  const [sessionStarted,     setSessionStarted]     = useState(false);
-  const [roster,             setRoster]             = useState([]);
-  const [rosterFile,         setRosterFile]         = useState(null);
-  const [orderNumber,        setOrderNumber]        = useState("");
-  const [operatorName,       setOperatorName]       = useState("");
+  const [sessionStarted,     setSessionStarted]     = useState(_s?.sessionStarted     ?? false);
+  const [roster,             setRoster]             = useState((_s?.roster ?? []).map(r => ({ comment: "", ...r })));
+  const [rosterFile,         setRosterFile]         = useState(_s?.rosterFile         ?? null);
+  const [orderNumber,        setOrderNumber]        = useState(_s?.orderNumber        ?? "");
+  const [operatorName,       setOperatorName]       = useState(_s?.operatorName       ?? "");
   const [cameraOn,           setCameraOn]           = useState(false);
   const [scanning,           setScanning]           = useState(false);
   const [inputMode,          setInputMode]          = useState("camera");
@@ -740,7 +761,7 @@ export default function App() {
   const [overlay,            setOverlay]            = useState(null);
   const [lastResult,         setLastResult]         = useState(null);
   const [lastConfirmed,      setLastConfirmed]      = useState(null);
-  const [log,                setLog]                = useState([]);
+  const [log,                setLog]                = useState(_s?.log               ?? []);
   const [view,               setView]               = useState("roster");
   const [error,              setError]              = useState(null);
   const [xlsxReady,          setXlsxReady]          = useState(!!window.XLSX);
@@ -750,9 +771,11 @@ export default function App() {
   const [showSettings,       setShowSettings]       = useState(false);
   const [showRosterComplete, setShowRosterComplete] = useState(false);
   const [showBinSetup,       setShowBinSetup]       = useState(false);
-  const [binMap,             setBinMap]             = useState(null);
-  const [firstScanTime,      setFirstScanTime]      = useState(null);
+  const [binMap,             setBinMap]             = useState(_s?.binMap            ?? null);
+  const [firstScanTime,      setFirstScanTime]      = useState(_s?.firstScanTime     ?? null);
   const [now,                setNow]                = useState(Date.now());
+  const [commentEditId,      setCommentEditId]      = useState(null);
+  const [commentDraft,       setCommentDraft]       = useState("");
 
   const scanned        = roster.filter(r => r.scanned && r.scanned !== false);
   const remaining      = roster.filter(r => !r.scanned || r.scanned === false).length;
@@ -763,10 +786,26 @@ export default function App() {
   const elapsedMin     = firstScanTime ? (now - firstScanTime) / 60000 : 0;
   const scanRate       = elapsedMin > 1 && passCount > 0 ? passCount / elapsedMin : null;
   const etaMin         = scanRate && remaining > 0 ? Math.ceil(remaining / scanRate) : null;
-  const rosterCols     = roster.length > 0 ? Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned") : [];
+  const rosterCols     = roster.length > 0 ? Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned" && k !== "comment") : [];
   const keyLabel       = formatKey(scanKey);
 
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
+
+  // Persist session to localStorage whenever key state changes (strip image thumbnails from log)
+  useEffect(() => {
+    if (!sessionStarted) return;
+    saveSession({
+      sessionStarted,
+      roster,
+      log: log.map(({ thumb, ...rest }) => rest),
+      orderNumber,
+      operatorName,
+      rosterFile,
+      binMap,
+      firstScanTime,
+    });
+  }, [sessionStarted, roster, log, orderNumber, operatorName, rosterFile, binMap, firstScanTime]);
+
 
   useEffect(() => {
     if (window.XLSX) return;
@@ -786,7 +825,7 @@ export default function App() {
 
   // ── Apply roster + build bins ─────────────────────────────────────────────
   const applyRoster = useCallback((parsed, fileName) => {
-    setRoster(parsed.map(r => ({ ...r, scanned: false })));
+    setRoster(parsed.map(r => ({ ...r, scanned: false, comment: "" })));
     setRosterFile(fileName);
     setLastResult(null); setLog([]); setThumb(null);
     setOverlay(null); setFirstScanTime(null); setLastConfirmed(null);
@@ -821,6 +860,19 @@ export default function App() {
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
     setCameraOn(false);
+  }, []);
+
+  const handleNewSession = useCallback(() => {
+    if (!window.confirm("Start a new session? Current progress will be cleared.")) return;
+    clearSession();
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    setCameraOn(false);
+    setSessionStarted(false);
+    setRoster([]); setRosterFile(null); setOrderNumber(""); setOperatorName("");
+    setLog([]); setBinMap(null); setFirstScanTime(null);
+    setOverlay(null); setThumb(null); setLastResult(null); setLastConfirmed(null);
+    setShowRosterComplete(false); setShowBinSetup(false); setError(null);
   }, []);
 
   // ── Core scan ─────────────────────────────────────────────────────────────
@@ -982,6 +1034,35 @@ export default function App() {
 
   const handleOverlayDismiss = useCallback(() => { setOverlay(null); }, []);
 
+  // ── Manual roster edits ───────────────────────────────────────────────────
+  const handleRosterEdit = useCallback((entry, action) => {
+    if (action === "pass" || action === "flag") {
+      const logEntry = {
+        id: Date.now(),
+        status: action === "pass" ? S_PASS : S_FLAGGED,
+        detected: { name: entry.name || "", number: entry.number || "" },
+        match: entry,
+        timestamp: new Date().toLocaleTimeString(),
+        reason: action === "pass" ? "Manual confirmation" : "Manual flag",
+      };
+      setRoster(prev => prev.map(r => r._id === entry._id ? { ...r, scanned: action === "pass" ? "pass" : "flag" } : r));
+      setLog(prev => [logEntry, ...prev]);
+      if (!firstScanTime) setFirstScanTime(Date.now());
+    } else if (action === "undo") {
+      setRoster(prev => prev.map(r => r._id === entry._id ? { ...r, scanned: false } : r));
+      setLog(prev => {
+        const idx = prev.findIndex(l => l.match?._id === entry._id);
+        return idx === -1 ? prev : [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      });
+    }
+  }, [firstScanTime]);
+
+  const handleRosterComment = useCallback((rosterId, text) => {
+    setRoster(prev => prev.map(r => r._id === rosterId ? { ...r, comment: text } : r));
+    setCommentEditId(null);
+    setCommentDraft("");
+  }, []);
+
   // ── Flag resolution ───────────────────────────────────────────────────────
   const resolveFlag = useCallback((logId, resolution) => {
     const entry = log.find(l => l.id === logId);
@@ -1058,7 +1139,7 @@ export default function App() {
           roster={roster}
           orderNumber={orderNumber}
           flagCount={flagCount}
-          onExport={() => { exportRosterXLSX(roster, orderNumber, operatorName); setShowRosterComplete(false); }}
+          onExport={() => { exportRosterXLSX(roster, orderNumber, operatorName, binMap); setShowRosterComplete(false); }}
           onDismiss={() => setShowRosterComplete(false)}
         />
       )}
@@ -1082,6 +1163,9 @@ export default function App() {
           <Pill color="#ef4444">{flagCount} Flag</Pill>
           {resolvedCount > 0 && <Pill color="#94a3b8">{resolvedCount} Resolved</Pill>}
           <button onClick={() => setShowSettings(true)} style={{ ...btnGhost, padding: "3px 9px" }}>⚙</button>
+          {sessionStarted && (
+            <button onClick={handleNewSession} style={{ ...btnGhost, padding: "3px 9px", fontSize: 11 }}>↩ New Session</button>
+          )}
         </div>
       </div>
 
@@ -1249,7 +1333,7 @@ export default function App() {
                 <>
                   <button onClick={() => rosterRef.current.click()} style={{ ...btnGhost, padding: "3px 8px", fontSize: 11 }}>Replace</button>
                   <input ref={rosterRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleRosterUpload} />
-                  <button onClick={() => exportRosterXLSX(roster, orderNumber, operatorName)}
+                  <button onClick={() => exportRosterXLSX(roster, orderNumber, operatorName, binMap)}
                     style={{ ...btnPri, padding: "3px 10px", fontSize: 11, background: rosterComplete ? "#22c55e" : "#3b82f6" }}>
                     {rosterComplete ? "✅ Export" : "⬇ Export"}
                   </button>
@@ -1266,9 +1350,10 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead style={{ position: "sticky", top: 0, background: "#161b22", zIndex: 1 }}>
                       <tr>
-                        <th style={thSt}>Status</th>
+                        <th style={{ ...thSt, minWidth: 90 }}>Status</th>
                         {rosterCols.map(c => <th key={c} style={thSt}>{c}</th>)}
                         {binMap && <th style={thSt}>Bin</th>}
+                        <th style={{ ...thSt, minWidth: 160 }}>Comment</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1277,8 +1362,26 @@ export default function App() {
                           background: r.scanned === "pass" ? "rgba(34,197,94,0.07)" : r.scanned === "flag" ? "rgba(239,68,68,0.07)" : r.scanned === "resolved" ? "rgba(148,163,184,0.07)" : "transparent",
                           borderBottom: "1px solid #1e293b",
                         }}>
-                          <td style={{ ...tdSt, textAlign: "center" }}>
-                            {r.scanned === "pass" ? "✅" : r.scanned === "flag" ? "🚩" : r.scanned === "resolved" ? "🔧" : <span style={{ color: "#475569" }}>—</span>}
+                          <td style={{ ...tdSt, whiteSpace: "nowrap" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              <span style={{ minWidth: 16, textAlign: "center" }}>
+                                {r.scanned === "pass" ? "✅" : r.scanned === "flag" ? "🚩" : r.scanned === "resolved" ? "🔧" : <span style={{ color: "#475569" }}>—</span>}
+                              </span>
+                              {(!r.scanned || r.scanned === false) && (
+                                <button onClick={() => handleRosterEdit(r, "pass")} title="Mark as passed"
+                                  style={{ padding: "1px 5px", borderRadius: 4, border: "1px solid rgba(34,197,94,0.4)", background: "rgba(34,197,94,0.1)", color: "#22c55e", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✓</button>
+                              )}
+                              {(!r.scanned || r.scanned === false || r.scanned === "flag") && (
+                                <button onClick={() => handleRosterEdit(r, r.scanned === "flag" ? "pass" : "flag")} title={r.scanned === "flag" ? "Mark as passed" : "Mark as flagged"}
+                                  style={{ padding: "1px 5px", borderRadius: 4, border: `1px solid ${r.scanned === "flag" ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)"}`, background: r.scanned === "flag" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)", color: r.scanned === "flag" ? "#22c55e" : "#ef4444", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                                  {r.scanned === "flag" ? "✓" : "🚩"}
+                                </button>
+                              )}
+                              {r.scanned && r.scanned !== false && (
+                                <button onClick={() => handleRosterEdit(r, "undo")} title="Undo"
+                                  style={{ padding: "1px 5px", borderRadius: 4, border: "1px solid rgba(100,116,139,0.4)", background: "rgba(100,116,139,0.1)", color: "#94a3b8", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>↩</button>
+                              )}
+                            </div>
                           </td>
                           {rosterCols.map(c => (
                             <td key={c} style={{ ...tdSt, fontWeight: c === "size" ? 700 : 400, color: c === "size" ? "#f59e0b" : "#e2e8f0" }}>
@@ -1290,6 +1393,28 @@ export default function App() {
                               {r.team && binMap[r.team] ? `Bin ${binMap[r.team]}` : "—"}
                             </td>
                           )}
+                          <td style={{ ...tdSt, minWidth: 160 }}>
+                            {commentEditId === r._id ? (
+                              <input
+                                autoFocus
+                                value={commentDraft}
+                                onChange={e => setCommentDraft(e.target.value)}
+                                onBlur={() => handleRosterComment(r._id, commentDraft)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") handleRosterComment(r._id, commentDraft);
+                                  if (e.key === "Escape") { setCommentEditId(null); setCommentDraft(""); }
+                                }}
+                                style={{ width: "100%", boxSizing: "border-box", padding: "3px 7px", borderRadius: 5, border: "1px solid #3b82f6", background: "#1e293b", color: "#e2e8f0", fontSize: 12 }}
+                              />
+                            ) : (
+                              <div
+                                onClick={() => { setCommentEditId(r._id); setCommentDraft(r.comment || ""); }}
+                                title="Click to add comment"
+                                style={{ cursor: "pointer", color: r.comment ? "#e2e8f0" : "#334155", fontStyle: r.comment ? "normal" : "italic", padding: "2px 4px", borderRadius: 4, minHeight: 20 }}>
+                                {r.comment || "add comment…"}
+                              </div>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1304,7 +1429,7 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                 <span style={{ fontSize: 12, color: "#94a3b8" }}>{log.length} scans this session</span>
                 {log.length > 0 && (
-                  <button onClick={() => exportLogCSV(log, orderNumber)} style={{ ...btnGhost, fontSize: 11 }}>⬇ Export Log</button>
+                  <button onClick={() => exportLogCSV(log, orderNumber, binMap)} style={{ ...btnGhost, fontSize: 11 }}>⬇ Export Log</button>
                 )}
               </div>
               {log.length === 0
