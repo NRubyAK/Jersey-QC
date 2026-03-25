@@ -415,10 +415,7 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
         if (isConfirm) { onConfirm(); return; }
         if (isPick || isClose) {
           const candidate = candidates[selectedIdx];
-          // Don't allow selecting an already-scanned entry
-          if (candidate && (!candidate.scanned || candidate.scanned === false)) {
-            onPickCandidate(candidate);
-          }
+          if (candidate) onPickCandidate(candidate);
           return;
         }
         if (isFlag) { onFlagBadScan(); return; }
@@ -432,17 +429,9 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
             // Double-tap: flag bad jersey
             onFlagBadScan();
           } else {
-            // Single tap: advance to next unscanned candidate
+            // Single tap: advance to next candidate
             const total = candidates.length;
-            if (total > 0) {
-              let next     = (selectedIdx + 1) % total;
-              let attempts = 0;
-              while (candidates[next]?.scanned && candidates[next].scanned !== false && attempts < total) {
-                next = (next + 1) % total;
-                attempts++;
-              }
-              setSelectedIdx(next);
-            }
+            if (total > 0) setSelectedIdx((selectedIdx + 1) % total);
           }
           setLastCancelPress(now);
           return;
@@ -458,14 +447,8 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
         e.preventDefault();
         const total = candidates.length;
         if (total > 0) {
-          const dir  = e.code === "ArrowDown" ? 1 : -1;
-          let next   = (selectedIdx + dir + total) % total;
-          let attempts = 0;
-          while (candidates[next]?.scanned && candidates[next].scanned !== false && attempts < total) {
-            next = (next + dir + total) % total;
-            attempts++;
-          }
-          setSelectedIdx(next);
+          const dir = e.code === "ArrowDown" ? 1 : -1;
+          setSelectedIdx((selectedIdx + dir + total) % total);
         }
       }
     };
@@ -480,6 +463,11 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
       {/* ── GREEN ── */}
       {(isConfirm || isDone) && match && (
         <>
+          {isConfirm && match.scanned && match.scanned !== false && (
+            <div style={{ background: "rgba(245,158,11,0.18)", border: "2px solid #f59e0b", borderRadius: 12, padding: "10px 28px", marginBottom: 12, fontSize: 22, fontWeight: 800, color: "#fcd34d", textAlign: "center" }}>
+              ⚠ Already scanned — confirm to flag as double scan or extra
+            </div>
+          )}
           <div style={{ fontSize: 120, lineHeight: 1, marginBottom: 4 }}>✅</div>
           <div style={{ fontSize: 96, fontWeight: 900, color: accent, letterSpacing: "-4px", textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>
             #{match.number}{match.name ? ` · ${match.name}` : ""}
@@ -529,15 +517,15 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
               const isSelected = i === selectedIdx;
               return (
                 <div key={c._id}
-                  onClick={() => { if (!isScanned) onPickCandidate(c); }}
-                  onMouseEnter={() => { if (!isScanned) setSelectedIdx(i); }}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "22px 32px", marginBottom: 14, borderRadius: 16, border: `4px solid ${isScanned ? "rgba(255,255,255,0.08)" : isSelected ? accent : "rgba(255,255,255,0.2)"}`, background: isScanned ? "rgba(255,255,255,0.02)" : isSelected ? "rgba(245,158,11,0.22)" : "rgba(255,255,255,0.06)", cursor: isScanned ? "default" : "pointer", opacity: isScanned ? 0.4 : 1 }}>
+                  onClick={() => onPickCandidate(c)}
+                  onMouseEnter={() => setSelectedIdx(i)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "22px 32px", marginBottom: 14, borderRadius: 16, border: `4px solid ${isScanned ? (isSelected ? "#f59e0b" : "rgba(245,158,11,0.3)") : isSelected ? accent : "rgba(255,255,255,0.2)"}`, background: isScanned ? (isSelected ? "rgba(245,158,11,0.15)" : "rgba(245,158,11,0.05)") : isSelected ? "rgba(245,158,11,0.22)" : "rgba(255,255,255,0.06)", cursor: "pointer", opacity: isScanned ? 0.72 : 1 }}>
                   <div>
-                    <div style={{ fontSize: 48, fontWeight: 900, color: isScanned ? "#64748b" : "#fff", lineHeight: 1.1 }}>#{c.number}{c.name ? ` · ${c.name}` : ""}</div>
+                    <div style={{ fontSize: 48, fontWeight: 900, color: "#fff", lineHeight: 1.1 }}>#{c.number}{c.name ? ` · ${c.name}` : ""}</div>
                     <div style={{ fontSize: 28, color: isSelected ? "#fcd34d" : "#94a3b8", marginTop: 4, fontWeight: 600 }}>{[c.team, c.size].filter(Boolean).join(" · ")}</div>
-                    {isScanned && <div style={{ fontSize: 20, color: "#22c55e", marginTop: 4, fontWeight: 700 }}>✓ Already scanned</div>}
+                    {isScanned && <div style={{ fontSize: 20, color: "#f59e0b", marginTop: 4, fontWeight: 700 }}>⚠ Already scanned — tap to flag as double/extra</div>}
                   </div>
-                  {!isScanned && isSelected && <span style={{ fontSize: 32, color: accent, fontWeight: 900 }}>← {formatKey(confirmKey)}</span>}
+                  {isSelected && <span style={{ fontSize: 32, color: isScanned ? "#f59e0b" : accent, fontWeight: 900 }}>← {formatKey(confirmKey)}</span>}
                 </div>
               );
             })}
@@ -561,8 +549,8 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
       {/* ── RED ── */}
       {isFlag && (
         <>
-          <div style={{ fontSize: 100, lineHeight: 1, marginBottom: 4 }}>🚩</div>
-          <div style={{ fontSize: 88, fontWeight: 900, color: accent, textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>NOT FOUND</div>
+          <div style={{ fontSize: 100, lineHeight: 1, marginBottom: 4 }}>{state.flagTitle ? "🔄" : "🚩"}</div>
+          <div style={{ fontSize: 88, fontWeight: 900, color: accent, textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>{state.flagTitle || "NOT FOUND"}</div>
           {state.scan?.detected && (
             <div style={{ fontSize: 42, color: "#fca5a5", marginTop: 12, textAlign: "center" }}>
               #{state.scan.detected.number || "?"}{state.scan.detected.name ? ` · ${state.scan.detected.name}` : ""}
@@ -574,7 +562,9 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
             </div>
           )}
           <div style={{ marginTop: 36, display: "flex", gap: 20, flexWrap: "wrap", justifyContent: "center" }}>
-            <OverlayBtn color="#ef4444" onClick={onFlagBadScan}>🚩 Flag &amp; continue <Kbd>{formatKey(confirmKey)}</Kbd></OverlayBtn>
+            <OverlayBtn color="#ef4444" onClick={onFlagBadScan}>
+              {state.flagTitle ? "🔄 Double scan — same jersey" : "🚩 Flag & continue"} <Kbd>{formatKey(confirmKey)}</Kbd>
+            </OverlayBtn>
             {state.canAddExtra && (
               <OverlayBtn color="#f59e0b" onClick={onAddExtra}>➕ Extra jersey — not in roster</OverlayBtn>
             )}
@@ -1476,23 +1466,14 @@ export default function App() {
     if (apiError)                            { showFlag("API error: " + apiError); return; }
     if (!detected.name && !detected.number) { showFlag("Could not read jersey — no name or number detected. Check lighting and angle."); return; }
 
-    // Duplicate check — if ALL matching roster entries are already scanned, offer double-scan or extra jersey.
-    // Handles multiple entries with the same name+number (different team/size).
-    if (detected.number && detected.name) {
-      const allMatching = roster.filter(r =>
-        norm(r.number) !== "" && norm(r.number) === norm(detected.number) &&
-        norm(r.name)   !== "" && norm(r.name)   === norm(detected.name)
-      );
-      if (allMatching.length > 0 && allMatching.every(r => r.scanned && r.scanned !== false)) {
-        const count = allMatching.length;
-        showFlag(`⚠ Double scan — all ${count} entr${count === 1 ? "y" : "ies"} for #${detected.number} · ${detected.name} already scanned. Same jersey, or an extra?`, { canAddExtra: true });
-        return;
-      }
-    }
-
     const match = findMatches(roster, detected.name, detected.number);
     if (match.type === "exact") {
-      setOverlay({ mode: "confirm", scan: { ...scanObj, match: match.match } });
+      // Single exact match — if already scanned, go straight to duplicate check; otherwise confirm
+      if (match.match.scanned && match.match.scanned !== false) {
+        showFlag(`#${match.match.number}${match.match.name ? ` · ${match.match.name}` : ""} was already scanned. Same jersey, or an extra?`, { canAddExtra: true, flagTitle: "ALREADY SCANNED" });
+      } else {
+        setOverlay({ mode: "confirm", scan: { ...scanObj, match: match.match } });
+      }
     } else if (match.type === "number_conflict" || match.type === "size_pick") {
       setOverlay({ mode: "pick",  scan: scanObj, candidates: match.candidates });
     } else if (match.type === "close") {
@@ -1558,6 +1539,13 @@ export default function App() {
   const handleConfirm = useCallback(() => {
     if (!overlay?.scan?.match) return;
     const scan  = overlay.scan;
+    // If the operator picked an already-scanned entry, ask double-scan vs extra before committing
+    if (scan.match.scanned && scan.match.scanned !== false) {
+      const m = scan.match;
+      setOverlay({ mode: "flag", scan, reason: `#${m.number}${m.name ? ` · ${m.name}` : ""} was already scanned. Same jersey, or an extra?`, canAddExtra: true, flagTitle: "ALREADY SCANNED" });
+      playTone("flag");
+      return;
+    }
     const entry = { ...scan, id: scan.id || Date.now(), status: S_PASS, timestamp: new Date().toLocaleTimeString() };
     setRoster(prev => prev.map(r => r._id === scan.match._id ? { ...r, scanned: "pass" } : r));
     setLog(prev => [entry, ...prev]);
@@ -1571,8 +1559,6 @@ export default function App() {
 
   const handlePickCandidate = useCallback((candidate) => {
     if (!overlay?.scan || !candidate) return;
-    // Guard: don't allow picking an already-scanned entry
-    if (candidate.scanned && candidate.scanned !== false) return;
     setOverlay({ mode: "confirm", scan: { ...overlay.scan, match: candidate } });
   }, [overlay]);
 
