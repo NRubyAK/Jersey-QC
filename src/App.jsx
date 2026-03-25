@@ -1,0 +1,1355 @@
+import { useState, useRef, useCallback, useEffect } from "react";
+
+const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
+const CLAUDE_API_KEY = import.meta.env.VITE_CLAUDE_API_KEY;
+
+const S_PASS    = "pass";
+const S_FLAGGED = "flagged";
+const S_MANUAL  = "manual";
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+function playTone(type) {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    if (type === "pass") {
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.start(); osc.stop(ctx.currentTime + 0.35);
+    } else if (type === "flag") {
+      osc.frequency.setValueAtTime(300, ctx.currentTime);
+      osc.frequency.setValueAtTime(220, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.4, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.start(); osc.stop(ctx.currentTime + 0.5);
+    } else if (type === "scan") {
+      osc.frequency.setValueAtTime(660, ctx.currentTime);
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+      osc.start(); osc.stop(ctx.currentTime + 0.1);
+    }
+  } catch {}
+}
+
+// ── CSV parser ────────────────────────────────────────────────────────────────
+// Auto-detects comma vs tab delimiter.
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const delim   = (lines[0].match(/\t/g) || []).length > (lines[0].match(/,/g) || []).length ? "\t" : ",";
+  const headers = lines[0].split(delim).map(h => h.trim().toLowerCase());
+  return normaliseRosterRows(
+    lines.slice(1).map((line, idx) => {
+      const vals = line.split(delim).map(v => v.trim());
+      const row  = { _id: idx };
+      headers.forEach((h, i) => { row[h] = vals[i] || ""; });
+      return row;
+    }).filter(r => r.name || r.number)
+  );
+}
+
+// ── Excel parser ──────────────────────────────────────────────────────────────
+function parseExcel(file) {
+  return new Promise((resolve, reject) => {
+    if (!window.XLSX) { reject(new Error("Excel library not loaded yet.")); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read file."));
+    reader.onload  = (e) => {
+      try {
+        const wb   = window.XLSX.read(e.target.result, { type: "array" });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const rows = window.XLSX.utils.sheet_to_json(ws, { defval: "" });
+        resolve(normaliseRosterRows(
+          rows.map((r, idx) => {
+            const row = { _id: idx };
+            Object.keys(r).forEach(k => { row[k.trim().toLowerCase()] = String(r[k]).trim(); });
+            return row;
+          }).filter(r => r.name || r.number)
+        ));
+      } catch (err) { reject(err); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// ── Column normalisation ──────────────────────────────────────────────────────
+// Merges "Size Range" + "Size" → "A-XS" / "Y-M" etc.
+// Renames "Team Name" → "team".
+function normaliseRosterRows(rows) {
+  if (rows.length === 0) return rows;
+  const keys         = Object.keys(rows[0]);
+  const hasSizeRange = keys.includes("size range");
+  const hasTeamName  = keys.includes("team name") && !keys.includes("team");
+  return rows.map(r => {
+    const out = { ...r };
+    if (hasSizeRange) {
+      out.size = `${(r["size range"] || "").trim()}-${(r["size"] || "").trim()}`;
+      delete out["size range"];
+    }
+    if (hasTeamName) {
+      out.team = r["team name"] || "";
+      delete out["team name"];
+    }
+    return out;
+  });
+}
+
+// ── Bin assignment ────────────────────────────────────────────────────────────
+function buildBinMap(roster) {
+  const teams = [...new Set(roster.map(r => r.team).filter(Boolean))].sort();
+  const map   = {};
+  teams.forEach((t, i) => { map[t] = i + 1; });
+  return map;
+}
+
+// ── Text normalisation ────────────────────────────────────────────────────────
+function norm(s) { return (s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+// ── Number-only roster detection ──────────────────────────────────────────────
+function isNumberOnlyRoster(roster) {
+  return roster.length > 0 && roster.every(r => !r.name || r.name.trim() === "");
+}
+
+// ── Match logic ───────────────────────────────────────────────────────────────
+// Never auto-confirms when ambiguity exists — always routes to pick screen.
+function findMatches(roster, name, number) {
+  const nName      = norm(name);
+  const nNum       = norm(number);
+  const numberOnly = isNumberOnlyRoster(roster);
+
+  if (numberOnly) {
+    const byNum = nNum ? roster.filter(r => norm(r.number) === nNum) : [];
+    if (byNum.length === 1) return { type: "exact",     match: byNum[0] };
+    if (byNum.length > 1)   return { type: "size_pick", candidates: byNum };
+    const close = nNum.length >= 2
+      ? roster.filter(r => norm(r.number).includes(nNum) || nNum.includes(norm(r.number)))
+      : [];
+    if (close.length > 0) return { type: "close", candidates: close };
+    return { type: "none" };
+  }
+
+  const byNum  = nNum  ? roster.filter(r => norm(r.number) === nNum)  : [];
+  const byName = nName ? roster.filter(r => norm(r.name)   === nName) : [];
+
+  // Entries matching on BOTH name and number (may differ by team/size)
+  const byBoth = byNum.filter(r => norm(r.name) === nName);
+
+  if (byBoth.length === 1) return { type: "exact",           match: byBoth[0] };
+  if (byBoth.length > 1)   return { type: "number_conflict", candidates: byBoth };
+
+  // Number matched, no name detected
+  if (byNum.length >= 1 && nName === "") {
+    if (byNum.length === 1) return { type: "exact",           match: byNum[0] };
+    return                          { type: "number_conflict", candidates: byNum };
+  }
+
+  // Number matched but name didn't agree
+  if (byNum.length >= 1) return { type: "number_conflict", candidates: byNum };
+
+  // Name-only match
+  if (byName.length === 1) return { type: "exact",           match: byName[0] };
+  if (byName.length > 1)   return { type: "number_conflict", candidates: byName };
+
+  // Fuzzy fallback
+  const closeMap = new Map();
+  [
+    ...(nNum.length  >= 2 ? roster.filter(r => norm(r.number).includes(nNum)  || nNum.includes(norm(r.number)))  : []),
+    ...(nName.length >= 3 ? roster.filter(r => norm(r.name).includes(nName)   || nName.includes(norm(r.name)))   : []),
+  ].forEach(r => closeMap.set(r._id, r));
+  const close = [...closeMap.values()];
+  if (close.length > 0) return { type: "close", candidates: close };
+
+  return { type: "none" };
+}
+
+// ── Exports ───────────────────────────────────────────────────────────────────
+function exportRosterXLSX(roster, orderNumber, operatorName) {
+  if (!window.XLSX) { alert("Excel library not loaded yet, please try again."); return; }
+  const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned");
+  const data = [
+    ["Order Number", orderNumber  || "—"],
+    ["Operator",     operatorName || "—"],
+    ["Export Date",  new Date().toLocaleString()],
+    [],
+    ["Status", ...cols.map(c => c.charAt(0).toUpperCase() + c.slice(1))],
+    ...roster.map(r => {
+      const s = r.scanned === "pass"     ? "PASS"
+              : r.scanned === "flag"     ? "FLAGGED"
+              : r.scanned === "resolved" ? "RESOLVED"
+              : "NOT SCANNED";
+      return [s, ...cols.map(c => r[c])];
+    }),
+  ];
+  const ws = window.XLSX.utils.aoa_to_sheet(data);
+  const wb = window.XLSX.utils.book_new();
+  window.XLSX.utils.book_append_sheet(wb, ws, "QC Results");
+  window.XLSX.writeFile(wb, `roster_${orderNumber ? orderNumber + "_" : ""}${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+function exportLogCSV(log, orderNumber) {
+  const header = "Time,Status,Detected Name,Detected Number,Matched Name,Matched Number,Team,Size,Notes";
+  const rows   = log.map(l => [
+    l.timestamp, l.status,
+    l.detected?.name   || "", l.detected?.number || "",
+    l.match?.name      || "", l.match?.number    || "",
+    l.match?.team      || "", l.match?.size      || "",
+    l.reason || l.resolution || "",
+  ].join(","));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([[header, ...rows].join("\n")], { type: "text/csv" }));
+  a.download = `log_${orderNumber ? orderNumber + "_" : ""}${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+function formatKey(code) {
+  const map = {
+    ShiftRight: "RShift", ShiftLeft: "LShift",
+    ControlRight: "RCtrl", ControlLeft: "LCtrl",
+    AltRight: "RAlt", AltLeft: "LAlt",
+    Space: "Space", Enter: "Enter", Tab: "Tab",
+    ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+  };
+  if (map[code]) return map[code];
+  if (code.startsWith("Key"))   return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  return code;
+}
+
+// ── Shared styles ─────────────────────────────────────────────────────────────
+const card     = { background: "#161b22", borderRadius: 10, border: "1px solid #21262d", marginBottom: 10, overflow: "hidden" };
+const btnPri   = { padding: "8px 18px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" };
+const btnGhost = { padding: "6px 12px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontWeight: 600, fontSize: 12, cursor: "pointer" };
+const btnSm    = { padding: "5px 12px", borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: "pointer" };
+const codeSt   = { background: "#1e293b", padding: "1px 6px", borderRadius: 4, fontSize: 12 };
+const thSt     = { padding: "6px 8px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 };
+const tdSt     = { padding: "6px 8px", color: "#e2e8f0", fontSize: 12 };
+
+function statusColor(s) {
+  if (s === S_PASS)    return "#22c55e";
+  if (s === S_FLAGGED) return "#ef4444";
+  if (s === S_MANUAL)  return "#94a3b8";
+  return "#64748b";
+}
+
+function Pill({ color, children }) {
+  return (
+    <span style={{ background: `${color}22`, color, fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 20, border: `1px solid ${color}44` }}>
+      {children}
+    </span>
+  );
+}
+
+function OverlayBtn({ color, outline, onClick, children }) {
+  return (
+    <button onClick={onClick} style={{ padding: "12px 24px", borderRadius: 12, border: `2px solid ${color}`, background: outline ? "transparent" : color, color: outline ? color : "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}>
+      {children}
+    </button>
+  );
+}
+
+function Kbd({ light, children }) {
+  return (
+    <kbd style={{ background: light ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.2)", padding: "2px 7px", borderRadius: 5, fontSize: 12, fontFamily: "monospace" }}>
+      {children}
+    </kbd>
+  );
+}
+
+// ── Session start modal ───────────────────────────────────────────────────────
+function SessionStartModal({ onStart, xlsxReady }) {
+  const [order,    setOrder]    = useState("");
+  const [operator, setOperator] = useState("");
+  const [file,     setFile]     = useState(null);
+  const [error,    setError]    = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFile = (e) => {
+    const f = e.target.files[0];
+    if (f) { setFile(f); setError(null); }
+    e.target.value = "";
+  };
+
+  const handleStart = async () => {
+    if (!operator.trim()) { setError("Please enter the operator name."); return; }
+    if (!order.trim())    { setError("Please enter an order number."); return; }
+    if (!file)            { setError("Please upload a roster file."); return; }
+    setLoading(true);
+    try {
+      const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+      const parsed  = isExcel ? await parseExcel(file) : parseCSV(await file.text());
+      if (parsed.length === 0) {
+        setError("No valid rows found. Check columns: name, number, team, size.");
+        setLoading(false);
+        return;
+      }
+      onStart({ roster: parsed, orderNumber: order.trim(), operatorName: operator.trim(), rosterFile: file.name });
+    } catch (err) {
+      setError("Failed to parse roster: " + err.message);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#0d1117", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 420, maxWidth: "90vw" }}>
+        <div style={{ fontSize: 32, marginBottom: 8, textAlign: "center" }}>🏭</div>
+        <div style={{ fontWeight: 900, fontSize: 22, textAlign: "center", marginBottom: 4 }}>Jersey QC Scanner</div>
+        <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 28 }}>Set up your session to begin</div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Operator Name</label>
+          <input value={operator} onChange={e => setOperator(e.target.value)} placeholder="e.g. John Smith"
+            autoFocus onKeyDown={e => e.key === "Enter" && handleStart()}
+            style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 }} />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Order Number</label>
+          <input value={order} onChange={e => setOrder(e.target.value)} placeholder="e.g. ORD-2024-001"
+            onKeyDown={e => e.key === "Enter" && handleStart()}
+            style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 }} />
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Roster File</label>
+          <div onClick={() => fileRef.current.click()}
+            style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${file ? "#22c55e" : "#334155"}`, background: "#1e293b", color: file ? "#22c55e" : "#64748b", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 16 }}>{file ? "✓" : "📂"}</span>
+            <span>{file ? file.name : "Choose CSV or Excel file…"}</span>
+          </div>
+          <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
+        </div>
+
+        {error && (
+          <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12, padding: "8px 12px", background: "rgba(239,68,68,0.08)", borderRadius: 6 }}>{error}</div>
+        )}
+
+        <button onClick={handleStart} disabled={loading}
+          style={{ width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: loading ? "wait" : "pointer", opacity: loading ? 0.7 : 1 }}>
+          {loading ? "Loading…" : "Start Session →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Scan overlay ──────────────────────────────────────────────────────────────
+function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan, onFlagBadJersey, onDismiss, onAutoScan, binMap, confirmKey, cancelKey }) {
+  const [selectedIdx,     setSelectedIdx]     = useState(0);
+  const [lastCancelPress, setLastCancelPress] = useState(0);
+
+  const isConfirm = state.mode === "confirm";
+  const isPick    = state.mode === "pick";
+  const isClose   = state.mode === "close";
+  const isFlag    = state.mode === "flag";
+  const isDone    = state.mode === "done";
+
+  const bg     = (isConfirm || isDone) ? "#052e16" : (isPick || isClose) ? "#1c1a06" : "#450a0a";
+  const accent = (isConfirm || isDone) ? "#22c55e" : (isPick || isClose) ? "#f59e0b" : "#ef4444";
+
+  const match   = state.scan?.match;
+  const hasSize = !!(match?.size && match.size.trim() !== "");
+  const binNum  = (binMap && match?.team && binMap[match.team]) ? binMap[match.team] : null;
+
+  // Default to first unscanned candidate when mode/candidates change
+  useEffect(() => {
+    if (state.candidates) {
+      const firstUnscanned = state.candidates.findIndex(c => !c.scanned || c.scanned === false);
+      setSelectedIdx(firstUnscanned >= 0 ? firstUnscanned : 0);
+    } else {
+      setSelectedIdx(0);
+    }
+  }, [state.mode, state.candidates]);
+
+  // Auto-dismiss done flash then fire next scan
+  useEffect(() => {
+    if (!isDone) return;
+    const t = setTimeout(() => { onDismiss(); onAutoScan(); }, 700);
+    return () => clearTimeout(t);
+  }, [isDone, onDismiss, onAutoScan]);
+
+  // Keyboard handler
+  useEffect(() => {
+    const candidates = state.candidates || [];
+    const onKey = (e) => {
+      if (e.code === confirmKey) {
+        e.preventDefault();
+        if (isConfirm) { onConfirm(); return; }
+        if (isPick || isClose) {
+          const candidate = candidates[selectedIdx];
+          // Don't allow selecting an already-scanned entry
+          if (candidate && (!candidate.scanned || candidate.scanned === false)) {
+            onPickCandidate(candidate);
+          }
+          return;
+        }
+        if (isFlag) { onFlagBadScan(); return; }
+      }
+      if (e.code === cancelKey) {
+        e.preventDefault();
+        if (isConfirm || isFlag) { onEdit(); return; }
+        if (isPick || isClose) {
+          const now = Date.now();
+          if (now - lastCancelPress < 400) {
+            // Double-tap: flag bad jersey
+            onFlagBadScan();
+          } else {
+            // Single tap: advance to next unscanned candidate
+            const total = candidates.length;
+            if (total > 0) {
+              let next     = (selectedIdx + 1) % total;
+              let attempts = 0;
+              while (candidates[next]?.scanned && candidates[next].scanned !== false && attempts < total) {
+                next = (next + 1) % total;
+                attempts++;
+              }
+              setSelectedIdx(next);
+            }
+          }
+          setLastCancelPress(now);
+          return;
+        }
+      }
+      if (e.code === "Enter" && isClose) {
+        e.preventDefault();
+        const candidate = candidates[selectedIdx];
+        if (candidate) onFlagBadJersey(candidate);
+        return;
+      }
+      if ((isPick || isClose) && (e.code === "ArrowDown" || e.code === "ArrowUp")) {
+        e.preventDefault();
+        const total = candidates.length;
+        if (total > 0) {
+          const dir  = e.code === "ArrowDown" ? 1 : -1;
+          let next   = (selectedIdx + dir + total) % total;
+          let attempts = 0;
+          while (candidates[next]?.scanned && candidates[next].scanned !== false && attempts < total) {
+            next = (next + dir + total) % total;
+            attempts++;
+          }
+          setSelectedIdx(next);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isConfirm, isPick, isClose, isFlag, isDone, selectedIdx, lastCancelPress, state.candidates, state.mode, confirmKey, cancelKey, onConfirm, onEdit, onPickCandidate, onFlagBadScan, onFlagBadJersey]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", userSelect: "none", padding: "20px 0", overflowY: "auto" }}>
+
+      {/* ── GREEN ── */}
+      {(isConfirm || isDone) && match && (
+        <>
+          <div style={{ fontSize: 100, lineHeight: 1, marginBottom: 4 }}>✅</div>
+          <div style={{ fontSize: 88, fontWeight: 900, color: accent, letterSpacing: "-4px", textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>
+            #{match.number}{match.name ? ` · ${match.name}` : ""}
+          </div>
+          {match.team && (
+            <div style={{ fontSize: 42, color: "#86efac", marginTop: 8, fontWeight: 700, textAlign: "center" }}>{match.team}</div>
+          )}
+          <div style={{ display: "flex", gap: 16, marginTop: 16, flexWrap: "wrap", justifyContent: "center" }}>
+            {hasSize && (
+              <div style={{ padding: "14px 48px", borderRadius: 20, border: "4px solid #22c55e", background: "rgba(34,197,94,0.12)", textAlign: "center", minWidth: 180 }}>
+                <div style={{ fontSize: 18, color: "#86efac", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Size</div>
+                <div style={{ fontSize: 96, fontWeight: 900, color: "#fff", letterSpacing: 6, lineHeight: 1 }}>{match.size}</div>
+              </div>
+            )}
+            {binNum !== null && (
+              <div style={{ padding: "14px 48px", borderRadius: 20, border: "4px solid #3b82f6", background: "rgba(59,130,246,0.12)", textAlign: "center", minWidth: 180 }}>
+                <div style={{ fontSize: 18, color: "#93c5fd", fontWeight: 700, textTransform: "uppercase", letterSpacing: 3, marginBottom: 4 }}>Bin</div>
+                <div style={{ fontSize: 96, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{binNum}</div>
+              </div>
+            )}
+          </div>
+          {isConfirm && (
+            <div style={{ marginTop: 28, display: "flex", gap: 20 }}>
+              <OverlayBtn color="#22c55e" onClick={onConfirm}>✓ Confirm <Kbd>{formatKey(confirmKey)}</Kbd></OverlayBtn>
+              <OverlayBtn color="#94a3b8" outline onClick={onEdit}>✎ Edit <Kbd light>{formatKey(cancelKey)}</Kbd></OverlayBtn>
+            </div>
+          )}
+          {isDone && (
+            <div style={{ fontSize: 28, color: "#4ade80", marginTop: 20, opacity: 0.8 }}>Scanning next jersey…</div>
+          )}
+        </>
+      )}
+
+      {/* ── YELLOW ── */}
+      {(isPick || isClose) && (
+        <>
+          <div style={{ fontSize: 64, lineHeight: 1, marginBottom: 4 }}>{isPick ? "⚠️" : "🔍"}</div>
+          <div style={{ fontSize: 52, fontWeight: 900, color: accent, marginBottom: 8, textAlign: "center", padding: "0 24px", lineHeight: 1.1 }}>
+            {isPick ? "Select correct player" : "Close match — confirm or flag"}
+          </div>
+          <div style={{ fontSize: 28, color: "#fcd34d", marginBottom: 16, opacity: 0.9, textAlign: "center" }}>
+            Detected: #{state.scan?.detected?.number || "?"}{state.scan?.detected?.name ? ` · ${state.scan.detected.name}` : ""}
+          </div>
+          <div style={{ width: "100%", maxWidth: 700, padding: "0 24px", boxSizing: "border-box", maxHeight: "45vh", overflowY: "auto" }}>
+            {state.candidates?.map((c, i) => {
+              const isScanned  = c.scanned && c.scanned !== false;
+              const isSelected = i === selectedIdx;
+              return (
+                <div key={c._id}
+                  onClick={() => { if (!isScanned) onPickCandidate(c); }}
+                  onMouseEnter={() => { if (!isScanned) setSelectedIdx(i); }}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 22px", marginBottom: 10, borderRadius: 14, border: `3px solid ${isScanned ? "rgba(255,255,255,0.08)" : isSelected ? accent : "rgba(255,255,255,0.12)"}`, background: isScanned ? "rgba(255,255,255,0.02)" : isSelected ? "rgba(245,158,11,0.18)" : "rgba(255,255,255,0.04)", cursor: isScanned ? "default" : "pointer", opacity: isScanned ? 0.45 : 1 }}>
+                  <div>
+                    <span style={{ fontSize: 28, fontWeight: 900, color: isScanned ? "#64748b" : "#fff" }}>#{c.number}{c.name ? ` · ${c.name}` : ""}</span>
+                    <span style={{ fontSize: 18, color: "#64748b", marginLeft: 14 }}>{[c.team, c.size].filter(Boolean).join(" · ")}</span>
+                    {isScanned && <span style={{ fontSize: 14, color: "#22c55e", marginLeft: 12, fontWeight: 700 }}>✓ Already scanned</span>}
+                  </div>
+                  {!isScanned && isSelected && <span style={{ fontSize: 18, color: accent, fontWeight: 700 }}>← {formatKey(confirmKey)}</span>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 16, display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
+            {isClose && (
+              <OverlayBtn color="#3b82f6" outline onClick={() => { const c = state.candidates?.[selectedIdx]; if (c) onFlagBadJersey(c); }}>
+                ✓ Bad scan, correct jersey <Kbd light>Enter</Kbd>
+              </OverlayBtn>
+            )}
+            <OverlayBtn color="#ef4444" outline onClick={onFlagBadScan}>
+              🚩 Bad jersey <Kbd light>double {formatKey(cancelKey)}</Kbd>
+            </OverlayBtn>
+          </div>
+          <div style={{ marginTop: 12, fontSize: 14, color: "rgba(255,255,255,0.3)", textAlign: "center" }}>
+            {formatKey(confirmKey)} select · {formatKey(cancelKey)} navigate · double {formatKey(cancelKey)} flag bad jersey
+          </div>
+        </>
+      )}
+
+      {/* ── RED ── */}
+      {isFlag && (
+        <>
+          <div style={{ fontSize: 100, lineHeight: 1, marginBottom: 4 }}>🚩</div>
+          <div style={{ fontSize: 88, fontWeight: 900, color: accent, textAlign: "center", padding: "0 24px", lineHeight: 1, marginTop: 4 }}>NOT FOUND</div>
+          {state.scan?.detected && (
+            <div style={{ fontSize: 42, color: "#fca5a5", marginTop: 12, textAlign: "center" }}>
+              #{state.scan.detected.number || "?"}{state.scan.detected.name ? ` · ${state.scan.detected.name}` : ""}
+            </div>
+          )}
+          {state.reason && (
+            <div style={{ fontSize: 24, color: "#fca5a5", marginTop: 10, textAlign: "center", padding: "0 40px", maxWidth: 700, opacity: 0.85, lineHeight: 1.4 }}>
+              {state.reason}
+            </div>
+          )}
+          <div style={{ marginTop: 36, display: "flex", gap: 20 }}>
+            <OverlayBtn color="#ef4444" onClick={onFlagBadScan}>🚩 Flag &amp; continue <Kbd>{formatKey(confirmKey)}</Kbd></OverlayBtn>
+            <OverlayBtn color="#94a3b8" outline onClick={onEdit}>↩ Retry <Kbd light>{formatKey(cancelKey)}</Kbd></OverlayBtn>
+          </div>
+        </>
+      )}
+
+      {/* Progress bar */}
+      {isDone && (
+        <div style={{ position: "absolute", bottom: 0, left: 0, height: 6, width: "100%", background: "#052e16" }}>
+          <div
+            ref={el => { if (el) { el.style.transition = "width 0.7s linear"; requestAnimationFrame(() => { el.style.width = "0%"; }); } }}
+            style={{ height: "100%", background: "#22c55e", width: "100%" }}
+          />
+        </div>
+      )}
+
+      {/* Thumbnail */}
+      {state.scan?.thumb && !isDone && (
+        <div style={{ position: "absolute", bottom: 12, right: 12, opacity: 0.3 }}>
+          <img src={state.scan.thumb} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 6 }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Result card ───────────────────────────────────────────────────────────────
+function ResultCard({ result, onResolve }) {
+  const [note, setNote] = useState("");
+  const isFlagged = result.status === S_FLAGGED;
+  return (
+    <div style={{ ...card, border: `1px solid ${statusColor(result.status)}`, background: isFlagged ? "rgba(239,68,68,0.06)" : "rgba(148,163,184,0.06)", padding: "12px 14px" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+        {result.thumb && <img src={result.thumb} alt="" style={{ width: 60, height: 45, objectFit: "cover", borderRadius: 5, flexShrink: 0 }} />}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(result.status), textTransform: "uppercase", letterSpacing: 1 }}>
+            {isFlagged ? "🚩 Flagged" : "🔧 Resolved"}
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginTop: 2 }}>
+            #{result.detected?.number || "?"} · {result.detected?.name || "Not detected"}
+          </div>
+          {result.reason     && <div style={{ fontSize: 12, color: "#f87171", marginTop: 2 }}>{result.reason}</div>}
+          {result.resolution && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>Resolution: {result.resolution}</div>}
+        </div>
+      </div>
+      {isFlagged && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #21262d" }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button onClick={() => onResolve(result.id, "Passed — manually verified")}      style={{ ...btnSm, background: "rgba(34,197,94,0.15)",  color: "#22c55e", border: "1px solid #22c55e" }}>✓ Accept</button>
+            <button onClick={() => onResolve(result.id, "Rejected — sent back for rework")} style={{ ...btnSm, background: "rgba(239,68,68,0.15)",  color: "#ef4444", border: "1px solid #ef4444" }}>✗ Reject</button>
+            <button onClick={() => onResolve(result.id, note || "No note provided")}        style={{ ...btnSm, background: "rgba(99,102,241,0.15)", color: "#818cf8", border: "1px solid #818cf8" }}>📝 Note</button>
+          </div>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="Optional note…"
+            style={{ marginTop: 6, width: "100%", boxSizing: "border-box", padding: "5px 9px", borderRadius: 6, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 12 }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+function SettingsPanel({ scanKey, confirmKey, cancelKey, onScanKeyChange, onConfirmKeyChange, onCancelKeyChange, onClose }) {
+  const [listening,   setListening]   = useState(null); // "scan" | "confirm" | "cancel" | null
+  const [tempScan,    setTempScan]    = useState(scanKey);
+  const [tempConfirm, setTempConfirm] = useState(confirmKey);
+  const [tempCancel,  setTempCancel]  = useState(cancelKey);
+
+  useEffect(() => {
+    if (!listening) return;
+    const h = e => {
+      e.preventDefault();
+      if (listening === "scan")    setTempScan(e.code);
+      if (listening === "confirm") setTempConfirm(e.code);
+      if (listening === "cancel")  setTempCancel(e.code);
+      setListening(null);
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [listening]);
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape" && !listening) onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose, listening]);
+
+  const rows = [
+    { label: "Scan trigger",     key: "scan",    temp: tempScan },
+    { label: "Confirm / select", key: "confirm", temp: tempConfirm },
+    { label: "Navigate / retry", key: "cancel",  temp: tempCancel },
+  ];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 500, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 12, border: "1px solid #21262d", padding: 24, width: 360, maxWidth: "90vw" }}>
+        <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 14 }}>⚙ Settings</div>
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>Keyboard shortcuts</div>
+          {rows.map(r => (
+            <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: "#94a3b8", width: 130, flexShrink: 0 }}>{r.label}</div>
+              <div style={{ flex: 1, padding: "6px 10px", borderRadius: 8, border: `1px solid ${listening === r.key ? "#3b82f6" : "#334155"}`, background: "#1e293b", color: "#e2e8f0", fontSize: 13, textAlign: "center" }}>
+                {listening === r.key ? "Press any key…" : formatKey(r.temp)}
+              </div>
+              <button onClick={() => setListening(r.key)} style={{ ...btnGhost, whiteSpace: "nowrap", padding: "4px 10px" }}>Change</button>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: "#475569", marginTop: 8 }}>Double-tap Navigate to flag bad jersey on the selection screen.</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => { onScanKeyChange(tempScan); onConfirmKeyChange(tempConfirm); onCancelKeyChange(tempCancel); onClose(); }} style={{ ...btnPri, flex: 1 }}>Save</button>
+          <button onClick={onClose} style={btnGhost}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Bin setup modal ───────────────────────────────────────────────────────────
+function BinSetupModal({ binMap, onConfirm }) {
+  const entries = Object.entries(binMap).sort((a, b) => a[1] - b[1]);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #3b82f6", padding: 40, maxWidth: 560, width: "90vw", textAlign: "center" }}>
+        <div style={{ fontSize: 48, marginBottom: 12 }}>🗂️</div>
+        <div style={{ fontSize: 26, fontWeight: 900, color: "#60a5fa", marginBottom: 8 }}>Prepare {entries.length} Bins</div>
+        <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 24 }}>
+          This order has <strong style={{ color: "#e2e8f0" }}>{entries.length} teams</strong>. Label your bins before scanning:
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 28, maxHeight: 320, overflowY: "auto" }}>
+          {entries.map(([team, bin]) => (
+            <div key={team} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 18px", borderRadius: 10, background: "#1e293b", border: "1px solid #334155" }}>
+              <div style={{ fontSize: 24, fontWeight: 900, color: "#60a5fa", minWidth: 72, textAlign: "center" }}>Bin {bin}</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0", textAlign: "left" }}>{team}</div>
+            </div>
+          ))}
+        </div>
+        <button onClick={onConfirm}
+          style={{ padding: "13px 36px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer" }}>
+          Bins ready — Start Scanning
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Roster complete modal ─────────────────────────────────────────────────────
+function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismiss }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #22c55e", padding: 40, maxWidth: 480, width: "90vw", textAlign: "center" }}>
+        <div style={{ fontSize: 56, marginBottom: 12 }}>🎉</div>
+        <div style={{ fontSize: 28, fontWeight: 900, color: "#22c55e", marginBottom: 8 }}>Order Complete!</div>
+        <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 6 }}>All {roster.length} jerseys have been scanned.</div>
+        {flagCount > 0 && (
+          <div style={{ fontSize: 14, color: "#f87171", marginBottom: 6 }}>⚠ {flagCount} flagged item{flagCount > 1 ? "s" : ""} require attention.</div>
+        )}
+        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 28 }}>Please review the roster before exporting.</div>
+        <div style={{ display: "flex", justifyContent: "center", gap: 24, marginBottom: 28 }}>
+          {[
+            { label: "Passed",   value: roster.filter(r => r.scanned === "pass").length,     color: "#22c55e" },
+            { label: "Flagged",  value: roster.filter(r => r.scanned === "flag").length,     color: "#ef4444" },
+            { label: "Resolved", value: roster.filter(r => r.scanned === "resolved").length, color: "#94a3b8" },
+          ].map(s => (
+            <div key={s.label}>
+              <div style={{ fontSize: 32, fontWeight: 900, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+          <button onClick={onExport}  style={{ ...btnPri, fontSize: 15, padding: "12px 28px", background: "#22c55e" }}>⬇ Export to Excel</button>
+          <button onClick={onDismiss} style={{ ...btnGhost, fontSize: 14, padding: "12px 20px" }}>Review first</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const videoRef  = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const rosterRef = useRef(null);
+  const photoRef  = useRef(null);
+
+  const [sessionStarted,     setSessionStarted]     = useState(false);
+  const [roster,             setRoster]             = useState([]);
+  const [rosterFile,         setRosterFile]         = useState(null);
+  const [orderNumber,        setOrderNumber]        = useState("");
+  const [operatorName,       setOperatorName]       = useState("");
+  const [cameraOn,           setCameraOn]           = useState(false);
+  const [scanning,           setScanning]           = useState(false);
+  const [inputMode,          setInputMode]          = useState("camera");
+  const [thumb,              setThumb]              = useState(null);
+  const [overlay,            setOverlay]            = useState(null);
+  const [lastResult,         setLastResult]         = useState(null);
+  const [lastConfirmed,      setLastConfirmed]      = useState(null);
+  const [log,                setLog]                = useState([]);
+  const [view,               setView]               = useState("roster");
+  const [error,              setError]              = useState(null);
+  const [xlsxReady,          setXlsxReady]          = useState(!!window.XLSX);
+  const [scanKey,            setScanKey]            = useState("KeyB");
+  const [confirmKey,         setConfirmKey]         = useState("KeyB");
+  const [cancelKey,          setCancelKey]          = useState("KeyA");
+  const [showSettings,       setShowSettings]       = useState(false);
+  const [showRosterComplete, setShowRosterComplete] = useState(false);
+  const [showBinSetup,       setShowBinSetup]       = useState(false);
+  const [binMap,             setBinMap]             = useState(null);
+  const [firstScanTime,      setFirstScanTime]      = useState(null);
+  const [now,                setNow]                = useState(Date.now());
+
+  const scanned        = roster.filter(r => r.scanned && r.scanned !== false);
+  const remaining      = roster.filter(r => !r.scanned || r.scanned === false).length;
+  const passCount      = log.filter(l => l.status === S_PASS).length;
+  const flagCount      = log.filter(l => l.status === S_FLAGGED).length;
+  const resolvedCount  = log.filter(l => l.status === S_MANUAL).length;
+  const rosterComplete = roster.length > 0 && remaining === 0;
+  const elapsedMin     = firstScanTime ? (now - firstScanTime) / 60000 : 0;
+  const scanRate       = elapsedMin > 1 && passCount > 0 ? passCount / elapsedMin : null;
+  const etaMin         = scanRate && remaining > 0 ? Math.ceil(remaining / scanRate) : null;
+  const rosterCols     = roster.length > 0 ? Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned") : [];
+  const keyLabel       = formatKey(scanKey);
+
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
+
+  useEffect(() => {
+    if (window.XLSX) return;
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.onload  = () => setXlsxReady(true);
+    s.onerror = () => setError("Failed to load Excel support.");
+    document.head.appendChild(s);
+  }, []);
+
+  useEffect(() => { return () => { streamRef.current?.getTracks().forEach(t => t.stop()); }; }, []);
+
+  // Only trigger complete modal after at least one scan
+  useEffect(() => {
+    if (roster.length > 0 && remaining === 0 && firstScanTime) setShowRosterComplete(true);
+  }, [remaining, roster.length, firstScanTime]);
+
+  // ── Apply roster + build bins ─────────────────────────────────────────────
+  const applyRoster = useCallback((parsed, fileName) => {
+    setRoster(parsed.map(r => ({ ...r, scanned: false })));
+    setRosterFile(fileName);
+    setLastResult(null); setLog([]); setThumb(null);
+    setOverlay(null); setFirstScanTime(null); setLastConfirmed(null);
+    setShowRosterComplete(false);
+    const bins = buildBinMap(parsed);
+    if (Object.keys(bins).length > 1) {
+      setBinMap(bins);
+      setShowBinSetup(true);
+    } else {
+      setBinMap(null);
+      setShowBinSetup(false);
+    }
+  }, []);
+
+  // ── Camera ────────────────────────────────────────────────────────────────
+  const startCamera = useCallback(async () => {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setCameraOn(true);
+    } catch {
+      setError("Camera access denied. Click the camera icon in your browser's address bar.");
+    }
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    setCameraOn(false);
+  }, []);
+
+  // ── Core scan ─────────────────────────────────────────────────────────────
+  const doRunScan = useCallback(async (base64, dataUrl) => {
+    if (!firstScanTime) setFirstScanTime(Date.now());
+    setScanning(true);
+    setThumb(dataUrl);
+    playTone("scan");
+
+    let detected = { name: "", number: "" };
+    let apiError  = null;
+
+    try {
+      const resp = await fetch("/api/anthropic/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": CLAUDE_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: CLAUDE_MODEL,
+          max_tokens: 200,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+              { type: "text",  text: `This is a photo of the back of a sports jersey in a manufacturing QC environment. Extract the player name and jersey number. Return ONLY valid JSON, no markdown: {"name":"PLAYERNAME","number":"##"}. Use "" if not visible.` },
+            ],
+          }],
+        }),
+      });
+      const data = await resp.json();
+      console.log(`Tokens — input: ${data.usage?.input_tokens}, output: ${data.usage?.output_tokens}`);
+      const raw  = (data.content || []).map(b => b.text || "").join("").replace(/```json|```/g, "").trim();
+      detected   = JSON.parse(raw);
+    } catch (e) {
+      apiError = e.message;
+    }
+
+    setScanning(false);
+    const scanObj  = { id: Date.now(), detected, thumb: dataUrl };
+    const showFlag = (reason) => { setOverlay({ mode: "flag", scan: scanObj, reason }); playTone("flag"); };
+
+    if (apiError)                            { showFlag("API error: " + apiError); return; }
+    if (!detected.name && !detected.number) { showFlag("Could not read jersey — no name or number detected. Check lighting and angle."); return; }
+
+    // Duplicate check — only block if there is exactly ONE matching entry and it's already done.
+    // Multiple entries with same name+number (different team/size) skip this and go to pick screen.
+    if (detected.number && detected.name) {
+      const allMatching = roster.filter(r =>
+        norm(r.number) !== "" && norm(r.number) === norm(detected.number) &&
+        norm(r.name)   !== "" && norm(r.name)   === norm(detected.name)
+      );
+      if (allMatching.length === 1 && allMatching[0].scanned === "pass") {
+        showFlag(`⚠ Duplicate! #${detected.number} · ${detected.name} (${[allMatching[0].team, allMatching[0].size].filter(Boolean).join(" ")}) already scanned.`);
+        return;
+      }
+    }
+
+    const match = findMatches(roster, detected.name, detected.number);
+    if (match.type === "exact") {
+      setOverlay({ mode: "confirm", scan: { ...scanObj, match: match.match } });
+    } else if (match.type === "number_conflict" || match.type === "size_pick") {
+      setOverlay({ mode: "pick",  scan: scanObj, candidates: match.candidates });
+    } else if (match.type === "close") {
+      setOverlay({ mode: "close", scan: scanObj, candidates: match.candidates });
+    } else {
+      showFlag(`"${detected.name || "?"}" #${detected.number || "?"} not found in roster.`);
+    }
+  }, [roster, firstScanTime]);
+
+  // ── Camera scan trigger ───────────────────────────────────────────────────
+  const doTriggerScan = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || scanning || !cameraOn || roster.length === 0 || inputMode !== "camera") return;
+    const video  = videoRef.current;
+    const canvas = canvasRef.current;
+    const w = video.videoWidth, h = video.videoHeight;
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(Math.PI);
+    ctx.drawImage(video, -w / 2, -h / 2, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    doRunScan(dataUrl.split(",")[1], dataUrl);
+  }, [scanning, cameraOn, roster.length, inputMode, doRunScan]);
+
+  // ── Auto-scan after green confirm ─────────────────────────────────────────
+  const doAutoScan = useCallback(() => {
+    if (!cameraOn || inputMode !== "camera") return;
+    setTimeout(() => doTriggerScan(), 150);
+  }, [doTriggerScan, cameraOn, inputMode]);
+
+  // ── Photo upload ──────────────────────────────────────────────────────────
+  const handlePhotoUpload = useCallback((e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = canvasRef.current;
+        canvas.width = img.width; canvas.height = img.height;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        doRunScan(dataUrl.split(",")[1], dataUrl);
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  }, [doRunScan]);
+
+  // ── Roster replacement ────────────────────────────────────────────────────
+  const handleRosterUpload = useCallback(async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = ""; setError(null);
+    try {
+      const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+      const parsed  = isExcel ? await parseExcel(file) : parseCSV(await file.text());
+      if (parsed.length === 0) { setError("No valid rows found. Check columns: name, number, team, size."); return; }
+      applyRoster(parsed, file.name);
+    } catch (err) { setError("Failed to parse roster: " + err.message); }
+  }, [applyRoster]);
+
+  // ── Overlay actions ───────────────────────────────────────────────────────
+  const handleConfirm = useCallback(() => {
+    if (!overlay?.scan?.match) return;
+    const scan  = overlay.scan;
+    const entry = { ...scan, id: scan.id || Date.now(), status: S_PASS, timestamp: new Date().toLocaleTimeString() };
+    setRoster(prev => prev.map(r => r._id === scan.match._id ? { ...r, scanned: "pass" } : r));
+    setLog(prev => [entry, ...prev]);
+    setLastResult(entry);
+    setLastConfirmed(entry);
+    setOverlay({ mode: "done", scan });
+    playTone("pass");
+  }, [overlay]);
+
+  const handleEdit = useCallback(() => { setOverlay(null); }, []);
+
+  const handlePickCandidate = useCallback((candidate) => {
+    if (!overlay?.scan || !candidate) return;
+    // Guard: don't allow picking an already-scanned entry
+    if (candidate.scanned && candidate.scanned !== false) return;
+    setOverlay({ mode: "confirm", scan: { ...overlay.scan, match: candidate } });
+  }, [overlay]);
+
+  const handleFlagBadJersey = useCallback((candidate) => {
+    if (!overlay?.scan) return;
+    const entry = { ...overlay.scan, id: overlay.scan.id || Date.now(), status: S_FLAGGED, reason: "Bad scan — correct jersey (misread by scanner)", match: candidate, timestamp: new Date().toLocaleTimeString() };
+    setLog(prev => [entry, ...prev]); setLastResult(entry); setOverlay(null); playTone("flag");
+  }, [overlay]);
+
+  const handleFlagBadScan = useCallback(() => {
+    if (!overlay?.scan) return;
+    const entry = { ...overlay.scan, id: overlay.scan.id || Date.now(), status: S_FLAGGED, reason: overlay.reason || "Flagged by operator — bad jersey.", timestamp: new Date().toLocaleTimeString() };
+    setLog(prev => [entry, ...prev]); setLastResult(entry); setOverlay(null); playTone("flag");
+  }, [overlay]);
+
+  const handleOverlayDismiss = useCallback(() => { setOverlay(null); }, []);
+
+  // ── Flag resolution ───────────────────────────────────────────────────────
+  const resolveFlag = useCallback((logId, resolution) => {
+    const entry = log.find(l => l.id === logId);
+    setLog(prev => prev.map(l => l.id === logId ? { ...l, status: S_MANUAL, resolution } : l));
+    setLastResult(prev => prev?.id === logId ? { ...prev, status: S_MANUAL, resolution } : prev);
+    if (entry?.match?._id !== undefined) {
+      setRoster(prev => prev.map(r => r._id === entry.match._id ? { ...r, scanned: "resolved" } : r));
+    }
+  }, [log]);
+
+  // ── Global keyboard: scan trigger only ───────────────────────────────────
+  useEffect(() => {
+    const onKey = (e) => {
+      if (overlay || showBinSetup || showRosterComplete || showSettings) return;
+      if (e.code !== scanKey) return;
+      if (["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+      e.preventDefault();
+      doTriggerScan();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay, showBinSetup, showRosterComplete, showSettings, scanKey, doTriggerScan]);
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ fontFamily: "system-ui,sans-serif", background: "#0d1117", height: "100vh", color: "#e2e8f0", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+      {!sessionStarted && (
+        <SessionStartModal
+          xlsxReady={xlsxReady}
+          onStart={({ roster, orderNumber, operatorName, rosterFile }) => {
+            applyRoster(roster, rosterFile);
+            setOrderNumber(orderNumber);
+            setOperatorName(operatorName);
+            setSessionStarted(true);
+          }}
+        />
+      )}
+
+      {showBinSetup && binMap && (
+        <BinSetupModal binMap={binMap} onConfirm={() => setShowBinSetup(false)} />
+      )}
+
+      {overlay && (
+        <ScanOverlay
+          state={overlay}
+          onConfirm={handleConfirm}
+          onEdit={handleEdit}
+          onPickCandidate={handlePickCandidate}
+          onFlagBadScan={handleFlagBadScan}
+          onFlagBadJersey={handleFlagBadJersey}
+          onDismiss={handleOverlayDismiss}
+          onAutoScan={doAutoScan}
+          binMap={binMap}
+          confirmKey={confirmKey}
+          cancelKey={cancelKey}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsPanel
+          scanKey={scanKey}
+          confirmKey={confirmKey}
+          cancelKey={cancelKey}
+          onScanKeyChange={setScanKey}
+          onConfirmKeyChange={setConfirmKey}
+          onCancelKeyChange={setCancelKey}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showRosterComplete && (
+        <RosterCompleteModal
+          roster={roster}
+          orderNumber={orderNumber}
+          flagCount={flagCount}
+          onExport={() => { exportRosterXLSX(roster, orderNumber, operatorName); setShowRosterComplete(false); }}
+          onDismiss={() => setShowRosterComplete(false)}
+        />
+      )}
+
+      {/* Header */}
+      <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", padding: "8px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14 }}>🏭 Jersey QC Scanner</div>
+            {rosterFile && (
+              <div style={{ fontSize: 10, color: "#64748b" }}>
+                {rosterFile}{orderNumber ? ` · Order: ${orderNumber}` : ""}{operatorName ? ` · ${operatorName}` : ""}
+              </div>
+            )}
+          </div>
+          <input value={orderNumber} onChange={e => setOrderNumber(e.target.value)} placeholder="Order number…"
+            style={{ padding: "4px 9px", borderRadius: 6, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 12, width: 160 }} />
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Pill color="#22c55e">{passCount} Pass</Pill>
+          <Pill color="#ef4444">{flagCount} Flag</Pill>
+          {resolvedCount > 0 && <Pill color="#94a3b8">{resolvedCount} Resolved</Pill>}
+          <button onClick={() => setShowSettings(true)} style={{ ...btnGhost, padding: "3px 9px" }}>⚙</button>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {roster.length > 0 && (
+        <div style={{ height: 4, background: "#1e293b", flexShrink: 0 }}>
+          <div style={{ height: "100%", background: rosterComplete ? "#22c55e" : "#3b82f6", width: `${(scanned.length / roster.length) * 100}%`, transition: "width 0.4s ease" }} />
+        </div>
+      )}
+
+      {/* Main layout */}
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+
+        {/* LEFT: Camera */}
+        <div style={{ width: 580, flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid #21262d", background: "#0d1117" }}>
+          <canvas ref={canvasRef} style={{ display: "none" }} />
+
+          {roster.length === 0 ? (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 32, textAlign: "center" }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>No Roster Loaded</div>
+              <div style={{ fontSize: 12, color: "#64748b", marginBottom: 16 }}>
+                CSV or Excel: <code style={codeSt}>name</code> <code style={codeSt}>number</code> <code style={codeSt}>team</code> <code style={codeSt}>size</code>
+              </div>
+              <button onClick={() => rosterRef.current.click()} style={{ ...btnPri, fontSize: 14, padding: "10px 24px" }}>
+                Upload Roster ({xlsxReady ? "CSV or Excel" : "CSV"})
+              </button>
+              <input ref={rosterRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleRosterUpload} />
+              {error && <p style={{ fontSize: 12, color: "#f87171", marginTop: 10 }}>{error}</p>}
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", borderBottom: "1px solid #21262d" }}>
+                {["camera", "upload"].map(m => (
+                  <button key={m} onClick={() => { setInputMode(m); if (m === "upload") stopCamera(); }}
+                    style={{ flex: 1, padding: "8px 0", border: "none", background: inputMode === m ? "rgba(59,130,246,0.1)" : "transparent", color: inputMode === m ? "#60a5fa" : "#64748b", fontWeight: 600, fontSize: 12, borderBottom: inputMode === m ? "2px solid #3b82f6" : "2px solid transparent", cursor: "pointer" }}>
+                    {m === "camera" ? "📷 Webcam" : "🖼 Upload"}
+                  </button>
+                ))}
+              </div>
+
+              {inputMode === "camera" && (
+                <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+                  <div style={{ position: "relative", background: "#000", flex: 1 }}>
+                    <video ref={videoRef} autoPlay playsInline muted
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: cameraOn ? "block" : "none", transform: "rotate(180deg)" }} />
+                    {!cameraOn && (
+                      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                        <span style={{ fontSize: 40 }}>📷</span>
+                        <span style={{ fontSize: 13, color: "#64748b" }}>Camera off</span>
+                      </div>
+                    )}
+                    {cameraOn && (
+                      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                        <div style={{ width: 200, height: 120, border: "2px solid rgba(255,255,255,0.35)", borderRadius: 6, boxShadow: "0 0 0 9999px rgba(0,0,0,0.25)" }} />
+                      </div>
+                    )}
+                    {scanning && (
+                      <div style={{ position: "absolute", inset: 0, background: "rgba(59,130,246,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <div style={{ color: "#fff", fontWeight: 700, background: "rgba(0,0,0,0.6)", padding: "8px 20px", borderRadius: 20 }}>⏳ Analysing…</div>
+                      </div>
+                    )}
+                    {cameraOn && !scanning && (
+                      <>
+                        <div style={{ position: "absolute", top: 8, right: 8, display: "flex", alignItems: "center", gap: 5, background: "rgba(0,0,0,0.55)", padding: "3px 9px", borderRadius: 20 }}>
+                          <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} />
+                          <span style={{ fontSize: 10, color: "#e2e8f0" }}>Ready</span>
+                        </div>
+                        <div style={{ position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)", background: "rgba(0,0,0,0.55)", color: "#94a3b8", fontSize: 10, padding: "3px 9px", borderRadius: 12, whiteSpace: "nowrap" }}>
+                          Press <kbd style={{ background: "#1e293b", padding: "1px 4px", borderRadius: 3, fontSize: 10 }}>{keyLabel}</kbd> to scan
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div style={{ padding: "10px 12px", display: "flex", gap: 8, borderTop: "1px solid #21262d" }}>
+                    {!cameraOn
+                      ? <button onClick={startCamera} style={{ ...btnPri, flex: 1, fontSize: 15, padding: "12px" }}>Start Camera</button>
+                      : <>
+                          <button onClick={stopCamera} style={{ ...btnGhost, width: 42 }}>■</button>
+                          <button onClick={doTriggerScan} disabled={scanning}
+                            style={{ ...btnPri, flex: 1, fontSize: 18, padding: "12px", opacity: scanning ? 0.4 : 1 }}>
+                            {scanning ? "Scanning…" : "⚡ SCAN"}
+                          </button>
+                        </>
+                    }
+                  </div>
+                  {error && <p style={{ padding: "0 12px 8px", fontSize: 11, color: "#f87171" }}>{error}</p>}
+                </div>
+              )}
+
+              {inputMode === "upload" && (
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20, gap: 12 }}>
+                  {thumb
+                    ? <img src={thumb} alt="uploaded" style={{ width: "100%", borderRadius: 8, maxHeight: 300, objectFit: "contain" }} />
+                    : <div style={{ width: "100%", aspectRatio: "4/3", background: "#0d1117", borderRadius: 8, border: "2px dashed #334155", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: "#475569" }}>
+                        <span style={{ fontSize: 36 }}>🖼</span>
+                        <span style={{ fontSize: 12 }}>No photo selected</span>
+                      </div>
+                  }
+                  <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handlePhotoUpload} />
+                  <button onClick={() => photoRef.current.click()} disabled={scanning}
+                    style={{ ...btnPri, width: "100%", fontSize: 16, padding: "12px", opacity: scanning ? 0.5 : 1 }}>
+                    {scanning ? "⏳ Analysing…" : "⚡ Upload & Scan"}
+                  </button>
+                </div>
+              )}
+
+              {lastConfirmed && (
+                <div style={{ padding: "7px 12px", borderTop: "1px solid #21262d", display: "flex", alignItems: "center", gap: 10, background: "rgba(34,197,94,0.05)", flexShrink: 0 }}>
+                  <span style={{ fontSize: 10, color: "#64748b", whiteSpace: "nowrap" }}>Last:</span>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>#{lastConfirmed.match?.number}{lastConfirmed.match?.name ? ` · ${lastConfirmed.match.name}` : ""}</span>
+                  {lastConfirmed.match?.size && <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 700 }}>{lastConfirmed.match.size}</span>}
+                  {binMap && lastConfirmed.match?.team && binMap[lastConfirmed.match.team] && (
+                    <span style={{ fontSize: 11, color: "#60a5fa", fontWeight: 700 }}>Bin {binMap[lastConfirmed.match.team]}</span>
+                  )}
+                  <span style={{ fontSize: 10, color: "#475569", marginLeft: "auto" }}>{lastConfirmed.timestamp}</span>
+                </div>
+              )}
+
+              {lastResult && lastResult.status !== S_PASS && !overlay && (
+                <div style={{ padding: "0 10px 10px", flexShrink: 0 }}>
+                  <ResultCard result={lastResult} onResolve={resolveFlag} />
+                </div>
+              )}
+
+              <div style={{ padding: "7px 12px", borderTop: "1px solid #21262d", background: "#0d1117", flexShrink: 0 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px" }}>
+                  {[[keyLabel, "Scan"], [formatKey(confirmKey), "Confirm"], [formatKey(cancelKey), "Navigate/Retry"], ["↑↓", "Navigate list"]].map(([k, d]) => (
+                    <div key={k} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                      <kbd style={{ background: "#1e293b", border: "1px solid #334155", padding: "1px 6px", borderRadius: 4, fontSize: 10 }}>{k}</kbd>
+                      <span style={{ fontSize: 10, color: "#64748b" }}>{d}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* RIGHT: Info panel */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", borderBottom: "1px solid #21262d", flexShrink: 0 }}>
+            {[
+              { label: "Scanned",   value: `${scanned.length} / ${roster.length}`, color: "#e2e8f0" },
+              { label: "Remaining", value: remaining,  color: remaining === 0 ? "#22c55e" : "#f59e0b" },
+              { label: "Flagged",   value: flagCount,  color: flagCount  > 0 ? "#ef4444" : "#64748b" },
+              { label: "ETA",       value: etaMin ? `${etaMin}m` : "—", color: "#64748b" },
+            ].map(s => (
+              <div key={s.label} style={{ padding: "10px 0", textAlign: "center", borderRight: "1px solid #21262d" }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: s.color, lineHeight: 1.2 }}>{s.value}</div>
+                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", borderBottom: "1px solid #21262d", flexShrink: 0 }}>
+            {["roster", "log"].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{ flex: 1, padding: "8px 0", border: "none", background: "transparent", color: view === v ? "#3b82f6" : "#64748b", fontWeight: 600, fontSize: 12, borderBottom: view === v ? "2px solid #3b82f6" : "2px solid transparent", cursor: "pointer", textTransform: "capitalize" }}>
+                {v === "log" ? `Log (${log.length})` : `Roster (${roster.length})`}
+              </button>
+            ))}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px", borderLeft: "1px solid #21262d" }}>
+              {roster.length > 0 && (
+                <>
+                  <button onClick={() => rosterRef.current.click()} style={{ ...btnGhost, padding: "3px 8px", fontSize: 11 }}>Replace</button>
+                  <input ref={rosterRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleRosterUpload} />
+                  <button onClick={() => exportRosterXLSX(roster, orderNumber, operatorName)}
+                    style={{ ...btnPri, padding: "3px 10px", fontSize: 11, background: rosterComplete ? "#22c55e" : "#3b82f6" }}>
+                    {rosterComplete ? "✅ Export" : "⬇ Export"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {view === "roster" && (
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {roster.length === 0
+                ? <div style={{ padding: 32, textAlign: "center", color: "#64748b" }}>No roster loaded.</div>
+                : (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead style={{ position: "sticky", top: 0, background: "#161b22", zIndex: 1 }}>
+                      <tr>
+                        <th style={thSt}>Status</th>
+                        {rosterCols.map(c => <th key={c} style={thSt}>{c}</th>)}
+                        {binMap && <th style={thSt}>Bin</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {roster.map((r, i) => (
+                        <tr key={i} style={{
+                          background: r.scanned === "pass" ? "rgba(34,197,94,0.07)" : r.scanned === "flag" ? "rgba(239,68,68,0.07)" : r.scanned === "resolved" ? "rgba(148,163,184,0.07)" : "transparent",
+                          borderBottom: "1px solid #1e293b",
+                        }}>
+                          <td style={{ ...tdSt, textAlign: "center" }}>
+                            {r.scanned === "pass" ? "✅" : r.scanned === "flag" ? "🚩" : r.scanned === "resolved" ? "🔧" : <span style={{ color: "#475569" }}>—</span>}
+                          </td>
+                          {rosterCols.map(c => (
+                            <td key={c} style={{ ...tdSt, fontWeight: c === "size" ? 700 : 400, color: c === "size" ? "#f59e0b" : "#e2e8f0" }}>
+                              {r[c]}
+                            </td>
+                          ))}
+                          {binMap && (
+                            <td style={{ ...tdSt, color: "#60a5fa", fontWeight: 700 }}>
+                              {r.team && binMap[r.team] ? `Bin ${binMap[r.team]}` : "—"}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+              }
+            </div>
+          )}
+
+          {view === "log" && (
+            <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>{log.length} scans this session</span>
+                {log.length > 0 && (
+                  <button onClick={() => exportLogCSV(log, orderNumber)} style={{ ...btnGhost, fontSize: 11 }}>⬇ Export Log</button>
+                )}
+              </div>
+              {log.length === 0
+                ? <div style={{ textAlign: "center", padding: 28, color: "#64748b" }}>No scans yet.</div>
+                : log.map(l => (
+                  <div key={l.id} style={{ ...card, borderLeft: `3px solid ${statusColor(l.status)}`, padding: "10px 12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: statusColor(l.status), textTransform: "uppercase", letterSpacing: 1 }}>{l.status}</span>
+                        <div style={{ fontWeight: 700, fontSize: 14, marginTop: 1 }}>#{l.detected?.number || "?"} · {l.detected?.name || "Unknown"}</div>
+                        {l.match && (
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                            Matched: {l.match.name || "—"} #{l.match.number}
+                            {l.match.size ? ` · ${l.match.size}` : ""}
+                            {l.match.team ? ` · ${l.match.team}` : ""}
+                            {binMap && l.match.team && binMap[l.match.team] ? ` · Bin ${binMap[l.match.team]}` : ""}
+                          </div>
+                        )}
+                        {l.reason     && <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 2 }}>⚠ {l.reason}</div>}
+                        {l.resolution && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>Resolution: {l.resolution}</div>}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#475569", marginLeft: 8, whiteSpace: "nowrap" }}>{l.timestamp}</div>
+                    </div>
+                  </div>
+                ))
+              }
+            </div>
+          )}
+
+          {remaining > 0 && roster.length > 0 && (
+            <div style={{ borderTop: "1px solid #21262d", padding: "8px 12px", maxHeight: 110, overflowY: "auto", flexShrink: 0 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>
+                Remaining ({remaining})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {roster.filter(r => !r.scanned || r.scanned === false).map(r => (
+                  <div key={r._id} style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 5, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>
+                    #{r.number}{r.name ? ` ${r.name}` : ""}{r.size ? ` (${r.size})` : ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
