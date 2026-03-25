@@ -282,8 +282,8 @@ function Kbd({ light, children }) {
 }
 
 // ── Session start modal ───────────────────────────────────────────────────────
-function SessionStartModal({ onStart, xlsxReady }) {
-  const [order,    setOrder]    = useState("");
+function SessionStartModal({ onStart, xlsxReady, preAssigned }) {
+  const [order,    setOrder]    = useState(preAssigned?.orderNumber || "");
   const [operator, setOperator] = useState("");
   const [file,     setFile]     = useState(null);
   const [error,    setError]    = useState(null);
@@ -299,17 +299,16 @@ function SessionStartModal({ onStart, xlsxReady }) {
   const handleStart = async () => {
     if (!operator.trim()) { setError("Please enter the operator name."); return; }
     if (!order.trim())    { setError("Please enter an order number."); return; }
-    if (!file)            { setError("Please upload a roster file."); return; }
+    if (!preAssigned && !file) { setError("Please upload a roster file."); return; }
     setLoading(true);
     try {
-      const isExcel = /\.(xlsx|xls)$/i.test(file.name);
-      const parsed  = isExcel ? await parseExcel(file) : parseCSV(await file.text());
-      if (parsed.length === 0) {
-        setError("No valid rows found. Check columns: name, number, team, size.");
-        setLoading(false);
-        return;
+      let parsed = preAssigned?.roster ?? null;
+      if (!parsed) {
+        const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+        parsed = isExcel ? await parseExcel(file) : parseCSV(await file.text());
+        if (parsed.length === 0) { setError("No valid rows found. Check columns: name, number, team, size."); setLoading(false); return; }
       }
-      onStart({ roster: parsed, orderNumber: order.trim(), operatorName: operator.trim(), rosterFile: file.name });
+      onStart({ roster: parsed, orderNumber: order.trim(), operatorName: operator.trim(), rosterFile: preAssigned?.rosterName ?? file?.name, packGroupId: preAssigned?.packGroupId ?? null, binMap: preAssigned?.binMap ?? null });
     } catch (err) {
       setError("Failed to parse roster: " + err.message);
       setLoading(false);
@@ -338,15 +337,23 @@ function SessionStartModal({ onStart, xlsxReady }) {
             style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 }} />
         </div>
 
-        <div style={{ marginBottom: 22 }}>
-          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Roster File</label>
-          <div onClick={() => fileRef.current.click()}
-            style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${file ? "#22c55e" : "#334155"}`, background: "#1e293b", color: file ? "#22c55e" : "#64748b", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 16 }}>{file ? "✓" : "📂"}</span>
-            <span>{file ? file.name : "Choose CSV or Excel file…"}</span>
+        {preAssigned ? (
+          <div style={{ marginBottom: 22, padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,0.4)", background: "rgba(34,197,94,0.08)" }}>
+            <div style={{ fontSize: 11, color: "#22c55e", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>✓ Roster pre-loaded by admin</div>
+            <div style={{ fontSize: 13, color: "#86efac" }}>{preAssigned.rosterName} · {preAssigned.roster?.length} players</div>
+            {preAssigned.packGroupId && <div style={{ fontSize: 11, color: "#60a5fa", marginTop: 3 }}>📦 Pack group assigned</div>}
           </div>
-          <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
-        </div>
+        ) : (
+          <div style={{ marginBottom: 22 }}>
+            <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Roster File</label>
+            <div onClick={() => fileRef.current.click()}
+              style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${file ? "#22c55e" : "#334155"}`, background: "#1e293b", color: file ? "#22c55e" : "#64748b", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 16 }}>{file ? "✓" : "📂"}</span>
+              <span>{file ? file.name : "Choose CSV or Excel file…"}</span>
+            </div>
+            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
+          </div>
+        )}
 
         {error && (
           <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12, padding: "8px 12px", background: "rgba(239,68,68,0.08)", borderRadius: 6 }}>{error}</div>
@@ -745,14 +752,514 @@ function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismi
   );
 }
 
+// ── Station setup modal ───────────────────────────────────────────────────────
+function StationSetupModal({ onSave }) {
+  const [name, setName] = useState("");
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#0d1117", zIndex: 3000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 380, maxWidth: "90vw", position: "relative" }}>
+        <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
+        <div style={{ fontWeight: 900, fontSize: 20, textAlign: "center", marginBottom: 6, marginTop: 8 }}>Set Station Name</div>
+        <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 24 }}>This only needs to be done once on this device.</div>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Station 1"
+          autoFocus onKeyDown={e => e.key === "Enter" && name.trim() && onSave(name.trim())}
+          style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14, marginBottom: 16 }} />
+        <button onClick={() => name.trim() && onSave(name.trim())}
+          style={{ width: "100%", padding: 13, borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer" }}>
+          Save &amp; Continue →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Admin panel ───────────────────────────────────────────────────────────────
+function AdminPanel({ onClose }) {
+  const [authed,      setAuthed]      = useState(false);
+  const [password,    setPassword]    = useState("");
+  const [authError,   setAuthError]   = useState(null);
+  const [tab,         setTab]         = useState("dashboard");
+  const [stations,    setStations]    = useState([]);
+  const [exports,     setExports]     = useState([]);
+  const [packGroups,  setPackGroups]  = useState([]);
+  const [busy,        setBusy]        = useState(false);
+  const [msg,         setMsg]         = useState(null);
+
+  const ah = { 'Content-Type': 'application/json', 'x-admin-password': password };
+
+  const login = async () => {
+    try {
+      const r = await fetch('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
+      if (r.ok) { setAuthed(true); setAuthError(null); loadAll(password); }
+      else setAuthError("Incorrect password.");
+    } catch { setAuthError("Server unreachable — is it running?"); }
+  };
+
+  const api = async (path, opts = {}) => {
+    const r = await fetch(path, { ...opts, headers: { ...ah, ...(opts.headers || {}) } });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  };
+
+  const loadAll = async (pw) => {
+    const h = { 'x-admin-password': pw || password };
+    try {
+      const [st, ex, pg] = await Promise.all([
+        fetch('/api/admin/stations',   { headers: h }).then(r => r.json()),
+        fetch('/api/admin/exports',    { headers: h }).then(r => r.json()),
+        fetch('/api/admin/packgroups', { headers: h }).then(r => r.json()),
+      ]);
+      setStations(st); setExports(ex); setPackGroups(pg);
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (!authed) return;
+    const t = setInterval(() => loadAll(), 5000);
+    return () => clearInterval(t);
+  }, [authed]);
+
+  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(null), 3000); };
+
+  if (!authed) return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 360, maxWidth: "90vw", position: "relative" }}>
+        <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
+        <button onClick={onClose} style={{ position: "absolute", top: 14, right: 14, background: "none", border: "none", color: "#64748b", fontSize: 20, cursor: "pointer" }}>✕</button>
+        <div style={{ fontWeight: 900, fontSize: 20, textAlign: "center", marginBottom: 6, marginTop: 8 }}>Admin Login</div>
+        <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 24 }}>Jersey QC Supervisor Panel</div>
+        <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password"
+          autoFocus onKeyDown={e => e.key === "Enter" && login()}
+          style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: `1px solid ${authError ? "#ef4444" : "#334155"}`, background: "#1e293b", color: "#e2e8f0", fontSize: 14, marginBottom: 10 }} />
+        {authError && <div style={{ fontSize: 12, color: "#f87171", marginBottom: 10 }}>{authError}</div>}
+        <button onClick={login} style={{ width: "100%", padding: 13, borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer" }}>
+          Login →
+        </button>
+      </div>
+    </div>
+  );
+
+  const tabStyle = (t) => ({ flex: 1, padding: "9px 0", border: "none", background: "transparent", color: tab === t ? "#3b82f6" : "#64748b", fontWeight: 600, fontSize: 13, borderBottom: tab === t ? "2px solid #3b82f6" : "2px solid transparent", cursor: "pointer" });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.95)", zIndex: 2500, display: "flex", flexDirection: "column" }}>
+      {/* Admin header */}
+      <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", padding: "10px 20px", display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
+        <img src={akLogo} alt="AK" style={{ height: 28 }} />
+        <div style={{ fontWeight: 800, fontSize: 15 }}>Admin Panel</div>
+        {msg && <div style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>{msg}</div>}
+        <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "1px solid #334155", color: "#94a3b8", padding: "4px 14px", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>✕ Close</button>
+      </div>
+      {/* Tabs */}
+      <div style={{ display: "flex", borderBottom: "1px solid #21262d", background: "#161b22", flexShrink: 0 }}>
+        {[["dashboard","Dashboard"], ["assign","Assign Roster"], ["packgroups","Pack Groups"], ["exports","Export History"]].map(([t, l]) => (
+          <button key={t} onClick={() => { setTab(t); loadAll(); }} style={tabStyle(t)}>{l}</button>
+        ))}
+      </div>
+      {/* Body */}
+      <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+
+        {/* ── Dashboard ── */}
+        {tab === "dashboard" && (
+          <AdminDashboard stations={stations} packGroups={packGroups} onRefresh={loadAll} />
+        )}
+
+        {/* ── Assign Roster ── */}
+        {tab === "assign" && (
+          <AdminAssign stations={stations} packGroups={packGroups} api={api} onDone={() => { loadAll(); flash("Roster assigned!"); }} />
+        )}
+
+        {/* ── Pack Groups ── */}
+        {tab === "packgroups" && (
+          <AdminPackGroups packGroups={packGroups} api={api} onDone={() => { loadAll(); flash("Saved!"); }} password={password} />
+        )}
+
+        {/* ── Export History ── */}
+        {tab === "exports" && (
+          <AdminExports exports={exports} packGroups={packGroups} api={api} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard({ stations, packGroups, onRefresh }) {
+  const now = Date.now();
+  const sorted = [...stations].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  if (sorted.length === 0) return (
+    <div style={{ textAlign: "center", padding: 60, color: "#64748b" }}>
+      <div style={{ fontSize: 36, marginBottom: 12 }}>📡</div>
+      <div style={{ fontSize: 16, fontWeight: 600 }}>No stations connected yet.</div>
+      <div style={{ fontSize: 13, marginTop: 6 }}>Stations appear here once they send a heartbeat.</div>
+    </div>
+  );
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "#64748b" }}>{sorted.length} station{sorted.length !== 1 ? "s" : ""} — auto-refreshes every 5s</div>
+        <button onClick={onRefresh} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}>↻ Refresh</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
+        {sorted.map(s => {
+          const p       = s.progress;
+          const active  = s.lastSeen && (now - s.lastSeen) < 120000;
+          const pct     = p ? Math.round((p.scanned / p.rosterCount) * 100) : 0;
+          const pgName  = p?.packGroupId ? (packGroups.find(pg => pg.id === p.packGroupId)?.name || null) : null;
+          return (
+            <div key={s.id} style={{ background: "#161b22", border: `1px solid ${active ? "#21262d" : "#1e293b"}`, borderRadius: 12, padding: 16, opacity: active ? 1 : 0.55 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 15 }}>{s.name}</div>
+                  {p?.operatorName && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{p.operatorName}</div>}
+                </div>
+                <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: active ? "rgba(34,197,94,0.12)" : "rgba(100,116,139,0.1)", color: active ? "#22c55e" : "#64748b", border: `1px solid ${active ? "rgba(34,197,94,0.3)" : "rgba(100,116,139,0.2)"}` }}>
+                  {active ? "ACTIVE" : "OFFLINE"}
+                </span>
+              </div>
+              {p ? (
+                <>
+                  <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>
+                    Order: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{p.orderNumber || "—"}</span>
+                    {pgName && <span style={{ marginLeft: 8, color: "#60a5fa", fontSize: 11 }}>📦 {pgName}</span>}
+                  </div>
+                  <div style={{ height: 6, background: "#1e293b", borderRadius: 3, marginBottom: 6 }}>
+                    <div style={{ height: "100%", background: pct === 100 ? "#22c55e" : "#3b82f6", borderRadius: 3, width: `${pct}%`, transition: "width 0.4s" }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
+                    <span style={{ color: "#e2e8f0" }}>{p.scanned}/{p.rosterCount} scanned</span>
+                    <span style={{ color: "#22c55e" }}>✓ {p.passCount}</span>
+                    <span style={{ color: "#ef4444" }}>⚑ {p.flagCount}</span>
+                  </div>
+                  {s.assigned && <div style={{ marginTop: 8, fontSize: 11, color: "#f59e0b", fontWeight: 600 }}>⏳ Roster assigned — waiting for operator</div>}
+                </>
+              ) : (
+                <div style={{ fontSize: 12, color: "#475569" }}>
+                  {s.assigned ? <span style={{ color: "#f59e0b", fontWeight: 600 }}>⏳ Roster assigned — waiting for operator</span> : "No active session"}
+                </div>
+              )}
+              {s.lastSeen && <div style={{ fontSize: 10, color: "#334155", marginTop: 8 }}>Last seen: {new Date(s.lastSeen).toLocaleTimeString()}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AdminAssign({ stations, packGroups, api, onDone }) {
+  const [stationId,   setStationId]   = useState("");
+  const [customName,  setCustomName]  = useState("");
+  const [file,        setFile]        = useState(null);
+  const [parsed,      setParsed]      = useState(null);
+  const [orderNum,    setOrderNum]    = useState("");
+  const [packGroupId, setPackGroupId] = useState("");
+  const [error,       setError]       = useState(null);
+  const [loading,     setLoading]     = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFile = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    e.target.value = ""; setError(null);
+    try {
+      const isExcel = /\.(xlsx|xls)$/i.test(f.name);
+      const rows = isExcel ? await parseExcel(f) : parseCSV(await f.text());
+      if (rows.length === 0) { setError("No valid rows found."); return; }
+      setFile(f); setParsed(rows);
+    } catch (err) { setError("Failed to parse: " + err.message); }
+  };
+
+  const assign = async () => {
+    const sid = stationId === "__custom__" ? customName.trim() : stationId;
+    if (!sid)    { setError("Select or enter a station."); return; }
+    if (!parsed) { setError("Upload a roster file."); return; }
+    setLoading(true);
+    try {
+      const selectedPG = packGroups.find(p => p.id === packGroupId);
+      await api('/api/admin/assign', {
+        method: 'POST',
+        body: JSON.stringify({ stationId: sid, roster: parsed, rosterName: file.name, orderNumber: orderNum, packGroupId: packGroupId || null, binMap: selectedPG?.binMap || null }),
+      });
+      onDone();
+      setFile(null); setParsed(null); setOrderNum(""); setPackGroupId(""); setStationId(""); setCustomName("");
+    } catch (err) { setError(err.message); }
+    setLoading(false);
+  };
+
+  const inp = { padding: "8px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 13, width: "100%", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 };
+
+  const knownStations = stations.filter(s => s.name);
+
+  return (
+    <div style={{ maxWidth: 480 }}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 20 }}>Assign Roster to Station</div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Station</label>
+        <select value={stationId} onChange={e => setStationId(e.target.value)} style={inp}>
+          <option value="">— select station —</option>
+          {knownStations.map(s => <option key={s.id} value={s.id}>{s.name}{s.progress?.orderNumber ? ` (${s.progress.orderNumber})` : ""}</option>)}
+          <option value="__custom__">+ Type a station name…</option>
+        </select>
+      </div>
+      {stationId === "__custom__" && (
+        <div style={{ marginBottom: 14 }}>
+          <label style={lbl}>Station Name</label>
+          <input value={customName} onChange={e => setCustomName(e.target.value)} placeholder="e.g. Station 3" style={inp} />
+        </div>
+      )}
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Order Number</label>
+        <input value={orderNum} onChange={e => setOrderNum(e.target.value)} placeholder="e.g. ORD-2025-042" style={inp} />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Roster File</label>
+        <div onClick={() => fileRef.current.click()} style={{ ...inp, color: file ? "#22c55e" : "#64748b", cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+          <span>{file ? "✓" : "📂"}</span><span>{file ? file.name : "Choose CSV or Excel…"}</span>
+        </div>
+        <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
+        {parsed && <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>{parsed.length} players · {[...new Set(parsed.map(r => r.team).filter(Boolean))].length} teams</div>}
+      </div>
+      <div style={{ marginBottom: 20 }}>
+        <label style={lbl}>Pack Group <span style={{ color: "#475569", textTransform: "none", fontWeight: 400 }}>(optional — links orders for combined packing)</span></label>
+        <select value={packGroupId} onChange={e => setPackGroupId(e.target.value)} style={inp}>
+          <option value="">— none —</option>
+          {packGroups.map(pg => <option key={pg.id} value={pg.id}>{pg.name}</option>)}
+        </select>
+        {packGroupId && packGroups.find(p => p.id === packGroupId)?.binMap && (
+          <div style={{ marginTop: 6, fontSize: 11, color: "#60a5fa" }}>
+            Bin assignments from this group will override roster auto-detection.
+          </div>
+        )}
+      </div>
+      {error && <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12 }}>{error}</div>}
+      <button onClick={assign} disabled={loading} style={{ padding: "10px 28px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", opacity: loading ? 0.7 : 1 }}>
+        {loading ? "Assigning…" : "Assign →"}
+      </button>
+    </div>
+  );
+}
+
+function AdminPackGroups({ packGroups, api, onDone, password }) {
+  const [view,      setView]      = useState("list"); // "list" | "create" | "detail"
+  const [detail,    setDetail]    = useState(null);
+  const [pgName,    setPgName]    = useState("");
+  const [file,      setFile]      = useState(null);
+  const [parsed,    setParsed]    = useState(null);
+  const [binDraft,  setBinDraft]  = useState({});
+  const [error,     setError]     = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const fileRef = useRef(null);
+
+  const inp = { padding: "8px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 13, width: "100%", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 };
+
+  const handleFile = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    e.target.value = "";
+    try {
+      const isExcel = /\.(xlsx|xls)$/i.test(f.name);
+      const rows = isExcel ? await parseExcel(f) : parseCSV(await f.text());
+      setFile(f); setParsed(rows);
+      const teams = [...new Set(rows.map(r => r.team).filter(Boolean))].sort();
+      const draft = {};
+      teams.forEach((t, i) => { draft[t] = i + 1; });
+      setBinDraft(draft);
+    } catch (err) { setError("Failed to parse: " + err.message); }
+  };
+
+  const create = async () => {
+    if (!pgName.trim()) { setError("Enter a group name."); return; }
+    if (Object.keys(binDraft).length === 0) { setError("Upload a roster to detect teams."); return; }
+    setLoading(true);
+    try {
+      await api('/api/admin/packgroups', { method: 'POST', body: JSON.stringify({ name: pgName.trim(), binMap: binDraft }) });
+      onDone(); setView("list"); setPgName(""); setFile(null); setParsed(null); setBinDraft({});
+    } catch (err) { setError(err.message); }
+    setLoading(false);
+  };
+
+  const openDetail = async (pg) => {
+    try {
+      const d = await fetch(`/api/admin/packgroups/${pg.id}`, { headers: { 'x-admin-password': password } }).then(r => r.json());
+      setDetail(d); setView("detail");
+    } catch {}
+  };
+
+  const downloadCombined = async (pg) => {
+    try {
+      const { orders } = await fetch(`/api/admin/packgroups/${pg.id}/combined`, { headers: { 'x-admin-password': password } }).then(r => r.json());
+      if (!window.XLSX) { alert("Excel library not loaded."); return; }
+      const wb = window.XLSX.utils.book_new();
+      // Summary sheet
+      const summaryData = [
+        ["Pack Group", pg.name],
+        ["Orders", orders.length],
+        ["Created", new Date(pg.createdAt).toLocaleString()],
+        [],
+        ["Bin Assignments"],
+        ["Bin", "Team"],
+        ...Object.entries(pg.binMap || {}).sort((a,b) => a[1]-b[1]).map(([t,b]) => [`Bin ${b}`, t]),
+        [],
+        ["Orders Included"],
+        ["Order #", "Operator", "Station", "Date", "Passed", "Flagged"],
+        ...orders.map(o => [o.orderNumber, o.operatorName, o.stationName, new Date(o.completedAt).toLocaleString(), o.roster.filter(r=>r.scanned==="pass").length, o.roster.filter(r=>r.scanned==="flag").length]),
+      ];
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(summaryData), "Summary");
+      // Combined roster sheet sorted by bin
+      const allRows = orders.flatMap(o => o.roster.map(r => ({ ...r, _orderNumber: o.orderNumber, _operator: o.operatorName, _binNum: pg.binMap?.[r.team] || 999 })));
+      allRows.sort((a, b) => a._binNum - b._binNum || (a.team||"").localeCompare(b.team||"") || (a.name||"").localeCompare(b.name||""));
+      const cols = ["Order #", "Bin", "Team", "Name", "Number", "Size", "Status", "Issue", "Operator"];
+      const combinedData = [cols, ...allRows.map(r => [r._orderNumber, r._binNum < 999 ? `Bin ${r._binNum}` : "—", r.team||"", r.name||"", r.number||"", r.size||"", r.scanned==="pass"?"PASS":r.scanned==="flag"?"FLAGGED":r.scanned==="resolved"?"RESOLVED":"NOT SCANNED", r.comment||"", r._operator])];
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(combinedData), "Combined Roster");
+      window.XLSX.writeFile(wb, `packgroup_${pg.name.replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`);
+    } catch (err) { alert("Export failed: " + err.message); }
+  };
+
+  if (view === "create") return (
+    <div style={{ maxWidth: 480 }}>
+      <button onClick={() => setView("list")} style={{ marginBottom: 16, background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 13 }}>← Back</button>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 20 }}>New Pack Group</div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Group Name</label>
+        <input value={pgName} onChange={e => setPgName(e.target.value)} placeholder="e.g. Spring 2025 — Teams A/B" style={inp} />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Upload a representative roster to detect teams</label>
+        <div onClick={() => fileRef.current.click()} style={{ ...inp, color: file ? "#22c55e" : "#64748b", cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+          <span>{file ? "✓" : "📂"}</span><span>{file ? file.name : "Choose CSV or Excel…"}</span>
+        </div>
+        <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
+      </div>
+      {Object.keys(binDraft).length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <label style={lbl}>Bin Assignments</label>
+          {Object.entries(binDraft).sort((a,b) => a[1]-b[1]).map(([team, bin]) => (
+            <div key={team} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <div style={{ flex: 1, fontSize: 13, color: "#e2e8f0" }}>{team}</div>
+              <input type="number" min={1} max={20} value={bin}
+                onChange={e => setBinDraft(prev => ({ ...prev, [team]: parseInt(e.target.value) || 1 }))}
+                style={{ width: 70, padding: "6px 10px", borderRadius: 6, border: "1px solid #334155", background: "#1e293b", color: "#60a5fa", fontWeight: 700, fontSize: 14, textAlign: "center" }} />
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12 }}>{error}</div>}
+      <button onClick={create} disabled={loading} style={{ padding: "10px 28px", borderRadius: 8, border: "none", background: "#22c55e", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", opacity: loading ? 0.7 : 1 }}>
+        {loading ? "Saving…" : "Create Pack Group"}
+      </button>
+    </div>
+  );
+
+  if (view === "detail" && detail) return (
+    <div style={{ maxWidth: 620 }}>
+      <button onClick={() => setView("list")} style={{ marginBottom: 16, background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 13 }}>← Back</button>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div style={{ fontSize: 16, fontWeight: 800 }}>📦 {detail.name}</div>
+        <button onClick={() => downloadCombined(detail)} style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: "#22c55e", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⬇ Combined Export</button>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Bin Assignments</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {Object.entries(detail.binMap || {}).sort((a,b) => a[1]-b[1]).map(([team, bin]) => (
+            <div key={team} style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "6px 14px", fontSize: 13 }}>
+              <span style={{ color: "#60a5fa", fontWeight: 700 }}>Bin {bin}</span> <span style={{ color: "#e2e8f0" }}>{team}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div>
+        <div style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Orders ({detail.orders?.length || 0})</div>
+        {(!detail.orders || detail.orders.length === 0) && <div style={{ color: "#475569", fontSize: 13 }}>No completed orders yet.</div>}
+        {detail.orders?.map(o => (
+          <div key={o.id} style={{ background: "#161b22", border: "1px solid #21262d", borderRadius: 8, padding: "10px 14px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{o.orderNumber || "—"}</div>
+              <div style={{ fontSize: 11, color: "#64748b" }}>{o.operatorName} · {o.stationName} · {new Date(o.completedAt).toLocaleString()}</div>
+            </div>
+            <div style={{ fontSize: 12, color: "#94a3b8" }}>{o.rosterCount} jerseys · {o.passCount} passed</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 16, fontWeight: 800 }}>Pack Groups</div>
+        <button onClick={() => setView("create")} style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ New Group</button>
+      </div>
+      {packGroups.length === 0 && <div style={{ color: "#475569", fontSize: 13 }}>No pack groups yet. Create one to link orders that should be packed together.</div>}
+      {packGroups.map(pg => (
+        <div key={pg.id} onClick={() => openDetail(pg)} style={{ background: "#161b22", border: "1px solid #21262d", borderRadius: 10, padding: "14px 18px", marginBottom: 10, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>📦 {pg.name}</div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+              {Object.keys(pg.binMap || {}).length} teams · {pg.orderCount || 0} orders
+              {" · "}Created {new Date(pg.createdAt).toLocaleDateString()}
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: "#475569" }}>→</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AdminExports({ exports, packGroups, api }) {
+  const downloadExport = async (id) => {
+    try {
+      const data = await api(`/api/admin/exports/${id}`);
+      if (!window.XLSX) { alert("Excel library not loaded."); return; }
+      exportRosterXLSX(data.roster, data.orderNumber, data.operatorName, data.binMap);
+    } catch (err) { alert("Download failed: " + err.message); }
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Export History ({exports.length})</div>
+      {exports.length === 0 && <div style={{ color: "#475569", fontSize: 13 }}>No completed orders saved yet. Orders are saved when an operator exports.</div>}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr>
+            {["Order #", "Operator", "Station", "Pack Group", "Date", "Count", ""].map(h => (
+              <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5, borderBottom: "1px solid #21262d" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {exports.map(e => (
+            <tr key={e.id} style={{ borderBottom: "1px solid #1e293b" }}>
+              <td style={{ padding: "8px 10px", fontWeight: 700, color: "#e2e8f0" }}>{e.orderNumber || "—"}</td>
+              <td style={{ padding: "8px 10px", color: "#94a3b8" }}>{e.operatorName || "—"}</td>
+              <td style={{ padding: "8px 10px", color: "#94a3b8" }}>{e.stationName || "—"}</td>
+              <td style={{ padding: "8px 10px", color: "#60a5fa" }}>{e.packGroupId ? (packGroups.find(p => p.id === e.packGroupId)?.name || "—") : "—"}</td>
+              <td style={{ padding: "8px 10px", color: "#64748b" }}>{new Date(e.completedAt).toLocaleString()}</td>
+              <td style={{ padding: "8px 10px", color: "#64748b" }}>{e.rosterCount}</td>
+              <td style={{ padding: "8px 10px" }}>
+                <button onClick={() => downloadExport(e.id)} style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>⬇ Excel</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const videoRef  = useRef(null);
-  const canvasRef = useRef(null);
-  const streamRef = useRef(null);
-  const rosterRef = useRef(null);
-  const photoRef  = useRef(null);
+  const videoRef         = useRef(null);
+  const canvasRef        = useRef(null);
+  const streamRef        = useRef(null);
+  const rosterRef        = useRef(null);
+  const photoRef         = useRef(null);
+  const heartbeatTimer   = useRef(null);
   const _s        = useRef(loadSession()).current;
+  const [stationName,        setStationName]        = useState(() => localStorage.getItem("jerseyqc_station") || "");
+  const [showStationSetup,   setShowStationSetup]   = useState(() => !localStorage.getItem("jerseyqc_station"));
+  const [showAdmin,          setShowAdmin]          = useState(false);
+  const [preAssigned,        setPreAssigned]        = useState(null);
 
   const [sessionStarted,     setSessionStarted]     = useState(_s?.sessionStarted     ?? false);
   const [roster,             setRoster]             = useState((_s?.roster ?? []).map(r => ({ comment: "", ...r })));
@@ -778,9 +1285,8 @@ export default function App() {
   const [showBinSetup,       setShowBinSetup]       = useState(false);
   const [binMap,             setBinMap]             = useState(_s?.binMap            ?? null);
   const [firstScanTime,      setFirstScanTime]      = useState(_s?.firstScanTime     ?? null);
+  const [packGroupId,        setPackGroupId]        = useState(_s?.packGroupId       ?? null);
   const [now,                setNow]                = useState(Date.now());
-  const [commentEditId,      setCommentEditId]      = useState(null);
-  const [commentDraft,       setCommentDraft]       = useState("");
 
   const scanned        = roster.filter(r => r.scanned && r.scanned !== false);
   const remaining      = roster.filter(r => !r.scanned || r.scanned === false).length;
@@ -796,20 +1302,42 @@ export default function App() {
 
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
 
-  // Persist session to localStorage whenever key state changes (strip image thumbnails from log)
+  // Station heartbeat when idle (no active session) — also polls for pre-assigned roster
+  useEffect(() => {
+    if (!stationName || sessionStarted) return;
+    const beat = async () => {
+      try {
+        const r = await fetch('/api/station/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ stationId: stationName, stationName, progress: null }) });
+        const { assigned } = await r.json();
+        if (assigned) setPreAssigned(assigned);
+      } catch {}
+    };
+    beat();
+    const t = setInterval(beat, 15000);
+    return () => clearInterval(t);
+  }, [stationName, sessionStarted]);
+
+  // Persist session to localStorage on every state change
   useEffect(() => {
     if (!sessionStarted) return;
-    saveSession({
-      sessionStarted,
-      roster,
-      log: log.map(({ thumb, ...rest }) => rest),
-      orderNumber,
-      operatorName,
-      rosterFile,
-      binMap,
-      firstScanTime,
-    });
-  }, [sessionStarted, roster, log, orderNumber, operatorName, rosterFile, binMap, firstScanTime]);
+    saveSession({ sessionStarted, roster, log: log.map(({ thumb, ...rest }) => rest), orderNumber, operatorName, rosterFile, binMap, firstScanTime, packGroupId });
+  }, [sessionStarted, roster, log, orderNumber, operatorName, rosterFile, binMap, firstScanTime, packGroupId]);
+
+  // Report progress to server — debounced so rapid scan confirmations batch into one call
+  useEffect(() => {
+    if (!sessionStarted || !stationName) return;
+    if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
+    heartbeatTimer.current = setTimeout(() => {
+      const scanned   = roster.filter(r => r.scanned && r.scanned !== false).length;
+      const passCount = log.filter(l => l.status === S_PASS).length;
+      const flagCount = log.filter(l => l.status === S_FLAGGED).length;
+      fetch('/api/station/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stationId: stationName, stationName, progress: { orderNumber, operatorName, rosterCount: roster.length, scanned, passCount, flagCount, packGroupId, lastScan: Date.now() } }),
+      }).catch(() => {});
+    }, 2000);
+    return () => clearTimeout(heartbeatTimer.current);
+  }, [sessionStarted, stationName, roster, log, orderNumber, packGroupId]);
 
 
   useEffect(() => {
@@ -829,19 +1357,20 @@ export default function App() {
   }, [remaining, roster.length, firstScanTime]);
 
   // ── Apply roster + build bins ─────────────────────────────────────────────
-  const applyRoster = useCallback((parsed, fileName) => {
+  const applyRoster = useCallback((parsed, fileName, overrideBinMap, pgId) => {
     setRoster(parsed.map(r => ({ ...r, scanned: false, comment: "" })));
     setRosterFile(fileName);
     setLastResult(null); setLog([]); setThumb(null);
     setOverlay(null); setFirstScanTime(null); setLastConfirmed(null);
     setShowRosterComplete(false);
-    const bins = buildBinMap(parsed);
-    if (Object.keys(bins).length > 1) {
-      setBinMap(bins);
-      setShowBinSetup(true);
+    setPackGroupId(pgId || null);
+    if (overrideBinMap && Object.keys(overrideBinMap).length > 0) {
+      setBinMap(overrideBinMap);
+      setShowBinSetup(false); // already confirmed by admin via pack group
     } else {
-      setBinMap(null);
-      setShowBinSetup(false);
+      const bins = buildBinMap(parsed);
+      if (Object.keys(bins).length > 1) { setBinMap(bins); setShowBinSetup(true); }
+      else { setBinMap(null); setShowBinSetup(false); }
     }
   }, []);
 
@@ -875,10 +1404,18 @@ export default function App() {
     setCameraOn(false);
     setSessionStarted(false);
     setRoster([]); setRosterFile(null); setOrderNumber(""); setOperatorName("");
-    setLog([]); setBinMap(null); setFirstScanTime(null);
+    setLog([]); setBinMap(null); setFirstScanTime(null); setPackGroupId(null);
     setOverlay(null); setThumb(null); setLastResult(null); setLastConfirmed(null);
     setShowRosterComplete(false); setShowBinSetup(false); setError(null);
   }, []);
+
+  const handleExportAndSave = useCallback((r, oNum, oName, bMap, pgId) => {
+    exportRosterXLSX(r, oNum, oName, bMap);
+    if (!stationName) return;
+    fetch('/api/station/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stationId: stationName, stationName, orderNumber: oNum, operatorName: oName, roster: r.map(({ thumb, ...rest }) => rest), log: log.map(({ thumb, ...rest }) => rest), binMap: bMap, packGroupId: pgId || null, completedAt: new Date().toISOString() }),
+    }).catch(() => {});
+  }, [stationName, log]);
 
   // ── Core scan ─────────────────────────────────────────────────────────────
   const doRunScan = useCallback(async (base64, dataUrl) => {
@@ -911,6 +1448,7 @@ export default function App() {
           }],
         }),
       });
+      if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`);
       const data = await resp.json();
       console.log(`Tokens — input: ${data.usage?.input_tokens}, output: ${data.usage?.output_tokens}`);
       const raw  = (data.content || []).map(b => b.text || "").join("").replace(/```json|```/g, "").trim();
@@ -926,15 +1464,16 @@ export default function App() {
     if (apiError)                            { showFlag("API error: " + apiError); return; }
     if (!detected.name && !detected.number) { showFlag("Could not read jersey — no name or number detected. Check lighting and angle."); return; }
 
-    // Duplicate check — only block if there is exactly ONE matching entry and it's already done.
-    // Multiple entries with same name+number (different team/size) skip this and go to pick screen.
+    // Duplicate check — if ALL matching roster entries are already scanned, block as double scan.
+    // Handles multiple entries with the same name+number (different team/size).
     if (detected.number && detected.name) {
       const allMatching = roster.filter(r =>
         norm(r.number) !== "" && norm(r.number) === norm(detected.number) &&
         norm(r.name)   !== "" && norm(r.name)   === norm(detected.name)
       );
-      if (allMatching.length === 1 && allMatching[0].scanned === "pass") {
-        showFlag(`⚠ Duplicate! #${detected.number} · ${detected.name} (${[allMatching[0].team, allMatching[0].size].filter(Boolean).join(" ")}) already scanned.`);
+      if (allMatching.length > 0 && allMatching.every(r => r.scanned && r.scanned !== false)) {
+        const count = allMatching.length;
+        showFlag(`⚠ Double scan — all ${count} entr${count === 1 ? "y" : "ies"} for #${detected.number} · ${detected.name} already scanned.`);
         return;
       }
     }
@@ -1064,8 +1603,6 @@ export default function App() {
 
   const handleRosterComment = useCallback((rosterId, text) => {
     setRoster(prev => prev.map(r => r._id === rosterId ? { ...r, comment: text } : r));
-    setCommentEditId(null);
-    setCommentDraft("");
   }, []);
 
   // ── Flag resolution ───────────────────────────────────────────────────────
@@ -1095,14 +1632,28 @@ export default function App() {
   return (
     <div style={{ fontFamily: "system-ui,sans-serif", background: "#0d1117", height: "100vh", color: "#e2e8f0", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-      {!sessionStarted && (
+      {showStationSetup && (
+        <StationSetupModal onSave={name => {
+          localStorage.setItem("jerseyqc_station", name);
+          setStationName(name); setShowStationSetup(false);
+        }} />
+      )}
+
+      {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+
+      {!sessionStarted && !showStationSetup && (
         <SessionStartModal
           xlsxReady={xlsxReady}
-          onStart={({ roster, orderNumber, operatorName, rosterFile }) => {
-            applyRoster(roster, rosterFile);
+          preAssigned={preAssigned}
+          onStart={({ roster, orderNumber, operatorName, rosterFile, packGroupId, binMap }) => {
+            applyRoster(roster, rosterFile, binMap, packGroupId);
             setOrderNumber(orderNumber);
             setOperatorName(operatorName);
             setSessionStarted(true);
+            if (preAssigned && stationName) {
+              fetch('/api/station/roster-accepted', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stationId: stationName }) }).catch(() => {});
+              setPreAssigned(null);
+            }
           }}
         />
       )}
@@ -1144,7 +1695,7 @@ export default function App() {
           roster={roster}
           orderNumber={orderNumber}
           flagCount={flagCount}
-          onExport={() => { exportRosterXLSX(roster, orderNumber, operatorName, binMap); setShowRosterComplete(false); }}
+          onExport={() => { handleExportAndSave(roster, orderNumber, operatorName, binMap, packGroupId); setShowRosterComplete(false); }}
           onDismiss={() => setShowRosterComplete(false)}
         />
       )}
@@ -1169,6 +1720,7 @@ export default function App() {
           <Pill color="#ef4444">{flagCount} Flag</Pill>
           {resolvedCount > 0 && <Pill color="#94a3b8">{resolvedCount} Resolved</Pill>}
           <button onClick={() => setShowSettings(true)} style={{ ...btnGhost, padding: "3px 9px" }}>⚙</button>
+          <button onClick={() => setShowAdmin(true)} style={{ ...btnGhost, padding: "3px 9px", fontSize: 11 }}>🔒 Admin</button>
           {sessionStarted && (
             <button onClick={handleNewSession} style={{ ...btnGhost, padding: "3px 9px", fontSize: 11 }}>↩ New Session</button>
           )}
@@ -1339,7 +1891,7 @@ export default function App() {
                 <>
                   <button onClick={() => rosterRef.current.click()} style={{ ...btnGhost, padding: "3px 8px", fontSize: 11 }}>Replace</button>
                   <input ref={rosterRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleRosterUpload} />
-                  <button onClick={() => exportRosterXLSX(roster, orderNumber, operatorName, binMap)}
+                  <button onClick={() => handleExportAndSave(roster, orderNumber, operatorName, binMap, packGroupId)}
                     style={{ ...btnPri, padding: "3px 10px", fontSize: 11, background: rosterComplete ? "#22c55e" : "#3b82f6" }}>
                     {rosterComplete ? "✅ Export" : "⬇ Export"}
                   </button>
@@ -1359,7 +1911,7 @@ export default function App() {
                         <th style={{ ...thSt, minWidth: 90 }}>Status</th>
                         {rosterCols.map(c => <th key={c} style={thSt}>{c}</th>)}
                         {binMap && <th style={thSt}>Bin</th>}
-                        <th style={{ ...thSt, minWidth: 160 }}>Comment</th>
+                        <th style={{ ...thSt, minWidth: 160 }}>Issue</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1400,26 +1952,18 @@ export default function App() {
                             </td>
                           )}
                           <td style={{ ...tdSt, minWidth: 160 }}>
-                            {commentEditId === r._id ? (
-                              <input
-                                autoFocus
-                                value={commentDraft}
-                                onChange={e => setCommentDraft(e.target.value)}
-                                onBlur={() => handleRosterComment(r._id, commentDraft)}
-                                onKeyDown={e => {
-                                  if (e.key === "Enter") handleRosterComment(r._id, commentDraft);
-                                  if (e.key === "Escape") { setCommentEditId(null); setCommentDraft(""); }
-                                }}
-                                style={{ width: "100%", boxSizing: "border-box", padding: "3px 7px", borderRadius: 5, border: "1px solid #3b82f6", background: "#1e293b", color: "#e2e8f0", fontSize: 12 }}
-                              />
-                            ) : (
-                              <div
-                                onClick={() => { setCommentEditId(r._id); setCommentDraft(r.comment || ""); }}
-                                title="Click to add comment"
-                                style={{ cursor: "pointer", color: r.comment ? "#e2e8f0" : "#334155", fontStyle: r.comment ? "normal" : "italic", padding: "2px 4px", borderRadius: 4, minHeight: 20 }}>
-                                {r.comment || "add comment…"}
-                              </div>
-                            )}
+                            <select
+                              value={r.comment || ""}
+                              onChange={e => handleRosterComment(r._id, e.target.value)}
+                              style={{ width: "100%", padding: "5px 8px", borderRadius: 5, border: "1px solid #4b5563", background: "#1e293b", color: r.comment ? "#f1f5f9" : "#94a3b8", fontSize: 14, fontWeight: r.comment ? 600 : 400, cursor: "pointer" }}>
+                              <option value="">—</option>
+                              <option value="Label">Label</option>
+                              <option value="Construction/Sewing">Construction/Sewing</option>
+                              <option value="Artwork/Logo">Artwork/Logo</option>
+                              <option value="Decoration">Decoration</option>
+                              <option value="Missing Jersey">Missing Jersey</option>
+                              <option value="Extra Jersey">Extra Jersey</option>
+                            </select>
                           </td>
                         </tr>
                       ))}
