@@ -49,13 +49,18 @@ app.get('/api/admin/stations', requireAdmin, (req, res) => {
   res.json(Object.values(stations));
 });
 
-// Assign a roster (+optional pack group binMap) to a station
+// Assign a roster (+optional pack group binMap) to a station — queues multiple assignments
 app.post('/api/admin/assign', requireAdmin, (req, res) => {
   const { stationId, roster, rosterName, orderNumber, packGroupId, binMap } = req.body;
   if (!stationId || !Array.isArray(roster)) return res.status(400).json({ error: 'stationId and roster required' });
   if (!stations[stationId]) stations[stationId] = { id: stationId, name: stationId };
-  stations[stationId].assigned = { roster, rosterName, orderNumber, packGroupId: packGroupId || null, binMap: binMap || null, assignedAt: Date.now() };
-  res.json({ ok: true });
+  if (!stations[stationId].assignedQueue) stations[stationId].assignedQueue = [];
+  // Replace if same order number already queued, otherwise append
+  const existing = stations[stationId].assignedQueue.findIndex(a => a.orderNumber === orderNumber);
+  const entry = { roster, rosterName, orderNumber, packGroupId: packGroupId || null, binMap: binMap || null, assignedAt: Date.now() };
+  if (existing >= 0) stations[stationId].assignedQueue[existing] = entry;
+  else stations[stationId].assignedQueue.push(entry);
+  res.json({ ok: true, queueLength: stations[stationId].assignedQueue.length });
 });
 
 // ── Station: heartbeat + progress reporting ────────────────────────────────
@@ -65,13 +70,17 @@ app.post('/api/station/heartbeat', (req, res) => {
   if (!stations[stationId]) stations[stationId] = { id: stationId };
   Object.assign(stations[stationId], { name: stationName, lastSeen: Date.now() });
   if (progress !== undefined) stations[stationId].progress = progress;
-  res.json({ assigned: stations[stationId].assigned || null });
+  const queue = stations[stationId].assignedQueue;
+  res.json({ assigned: (queue && queue.length) ? queue : null });
 });
 
-// Station confirms it picked up the assigned roster — clear it
+// Station confirms it picked up one assigned roster — remove it from the queue by order number
 app.post('/api/station/roster-accepted', (req, res) => {
-  const { stationId } = req.body;
-  if (stations[stationId]) delete stations[stationId].assigned;
+  const { stationId, orderNumber } = req.body;
+  if (stations[stationId]?.assignedQueue) {
+    stations[stationId].assignedQueue = stations[stationId].assignedQueue.filter(a => a.orderNumber !== orderNumber);
+    if (stations[stationId].assignedQueue.length === 0) delete stations[stationId].assignedQueue;
+  }
   res.json({ ok: true });
 });
 

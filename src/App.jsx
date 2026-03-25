@@ -286,87 +286,108 @@ function Kbd({ light, children }) {
 
 // ── Session start modal ───────────────────────────────────────────────────────
 function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
-  const [order,    setOrder]    = useState(preAssigned?.orderNumber || "");
-  const [operator, setOperator] = useState("");
-  const [file,     setFile]     = useState(null);
-  const [error,    setError]    = useState(null);
-  const [loading,  setLoading]  = useState(false);
+  const assignments  = Array.isArray(preAssigned) ? preAssigned : (preAssigned ? [preAssigned] : []);
+  const hasQueue     = assignments.length > 0;
+
+  const [selIdx,    setSelIdx]    = useState(() => assignments.length === 1 ? 0 : -1);
+  const [operator,  setOperator]  = useState("");
+  const [order,     setOrder]     = useState("");
+  const [file,      setFile]      = useState(null);
+  const [manual,    setManual]    = useState(!hasQueue);
+  const [error,     setError]     = useState(null);
+  const [loading,   setLoading]   = useState(false);
   const fileRef = useRef(null);
 
-  const handleFile = (e) => {
-    const f = e.target.files[0];
-    if (f) { setFile(f); setError(null); }
-    e.target.value = "";
-  };
+  const selected   = selIdx >= 0 ? assignments[selIdx] : null;
+  const useManual  = manual || !hasQueue;
+  const inputStyle = { width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 };
+  const lblStyle   = { fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 };
 
   const handleStart = async () => {
     if (!operator.trim()) { setError("Please enter the operator name."); return; }
-    if (!order.trim())    { setError("Please enter an order number."); return; }
-    if (!preAssigned && !file) { setError("Please upload a roster file."); return; }
-    setLoading(true);
-    try {
-      let parsed = preAssigned?.roster ?? null;
-      if (!parsed) {
+    if (!useManual) {
+      if (!selected) { setError("Please select an order."); return; }
+      onStart({ roster: selected.roster, orderNumber: selected.orderNumber, operatorName: operator.trim(), rosterFile: selected.rosterName, packGroupId: selected.packGroupId ?? null, binMap: selected.binMap ?? null, acceptedOrderNumber: selected.orderNumber });
+    } else {
+      if (!order.trim()) { setError("Please enter an order number."); return; }
+      if (!file)         { setError("Please upload a roster file."); return; }
+      setLoading(true);
+      try {
         const isExcel = /\.(xlsx|xls)$/i.test(file.name);
-        parsed = isExcel ? await parseExcel(file) : parseCSV(await file.text());
+        const parsed  = isExcel ? await parseExcel(file) : parseCSV(await file.text());
         if (parsed.length === 0) { setError("No valid rows found. Check columns: name, number, team, size."); setLoading(false); return; }
-      }
-      onStart({ roster: parsed, orderNumber: order.trim(), operatorName: operator.trim(), rosterFile: preAssigned?.rosterName ?? file?.name, packGroupId: preAssigned?.packGroupId ?? null, binMap: preAssigned?.binMap ?? null });
-    } catch (err) {
-      setError("Failed to parse roster: " + err.message);
-      setLoading(false);
+        onStart({ roster: parsed, orderNumber: order.trim(), operatorName: operator.trim(), rosterFile: file.name, packGroupId: null, binMap: null });
+      } catch (err) { setError("Failed to parse roster: " + err.message); setLoading(false); }
     }
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "#0d1117", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ position: "fixed", inset: 0, background: "#0d1117", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", overflowY: "auto", padding: "20px 0" }}>
       <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 420, maxWidth: "90vw", position: "relative" }}>
         <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
         <div style={{ fontSize: 32, marginBottom: 8, textAlign: "center" }}>🏭</div>
         <div style={{ fontWeight: 900, fontSize: 22, textAlign: "center", marginBottom: 4 }}>Jersey QC Scanner</div>
         <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 28 }}>Set up your session to begin</div>
 
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Operator Name</label>
+        {/* ── Pre-assigned order picker ── */}
+        {hasQueue && !manual && (
+          <div style={{ marginBottom: 20 }}>
+            <label style={lblStyle}>Select Order ({assignments.length} assigned)</label>
+            {assignments.map((a, i) => (
+              <div key={i} onClick={() => setSelIdx(i)}
+                style={{ padding: "12px 14px", marginBottom: 8, borderRadius: 10, border: `2px solid ${i === selIdx ? "#3b82f6" : "#334155"}`, background: i === selIdx ? "rgba(59,130,246,0.1)" : "#1e293b", cursor: "pointer" }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#e2e8f0" }}>{a.orderNumber || "—"}</div>
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{a.rosterName} · {a.roster?.length} players</div>
+                {a.packGroupId && <div style={{ fontSize: 11, color: "#60a5fa", marginTop: 2 }}>📦 Pack group assigned</div>}
+              </div>
+            ))}
+            <button onClick={() => setManual(true)}
+              style={{ fontSize: 11, color: "#475569", background: "none", border: "none", cursor: "pointer", padding: 0, marginTop: 2 }}>
+              ↑ Upload a different roster instead
+            </button>
+          </div>
+        )}
+
+        {/* ── Manual order + file fields ── */}
+        {useManual && (
+          <>
+            {hasQueue && (
+              <button onClick={() => setManual(false)}
+                style={{ fontSize: 11, color: "#3b82f6", background: "none", border: "none", cursor: "pointer", padding: 0, marginBottom: 16 }}>
+                ← Back to assigned orders
+              </button>
+            )}
+            <div style={{ marginBottom: 14 }}>
+              <label style={lblStyle}>Order Number</label>
+              <input value={order} onChange={e => setOrder(e.target.value)} placeholder="e.g. ORD-2024-001"
+                onKeyDown={e => e.key === "Enter" && handleStart()}
+                style={inputStyle} />
+            </div>
+            <div style={{ marginBottom: 22 }}>
+              <label style={lblStyle}>Roster File</label>
+              <div onClick={() => fileRef.current.click()}
+                style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${file ? "#22c55e" : "#334155"}`, background: "#1e293b", color: file ? "#22c55e" : "#64748b", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 16 }}>{file ? "✓" : "📂"}</span>
+                <span>{file ? file.name : "Choose CSV or Excel file…"}</span>
+              </div>
+              <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (f) { setFile(f); setError(null); } e.target.value = ""; }} />
+            </div>
+          </>
+        )}
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={lblStyle}>Operator Name</label>
           <input value={operator} onChange={e => setOperator(e.target.value)} placeholder="e.g. John Smith"
             autoFocus onKeyDown={e => e.key === "Enter" && handleStart()}
-            style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 }} />
+            style={inputStyle} />
         </div>
 
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Order Number</label>
-          <input value={order} onChange={e => setOrder(e.target.value)} placeholder="e.g. ORD-2024-001"
-            onKeyDown={e => e.key === "Enter" && handleStart()}
-            style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8, border: "1px solid #334155", background: "#1e293b", color: "#e2e8f0", fontSize: 14 }} />
-        </div>
-
-        {preAssigned ? (
-          <div style={{ marginBottom: 22, padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,0.4)", background: "rgba(34,197,94,0.08)" }}>
-            <div style={{ fontSize: 11, color: "#22c55e", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>✓ Roster pre-loaded by admin</div>
-            <div style={{ fontSize: 13, color: "#86efac" }}>{preAssigned.rosterName} · {preAssigned.roster?.length} players</div>
-            {preAssigned.packGroupId && <div style={{ fontSize: 11, color: "#60a5fa", marginTop: 3 }}>📦 Pack group assigned</div>}
-          </div>
-        ) : (
-          <div style={{ marginBottom: 22 }}>
-            <label style={{ fontSize: 11, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 5 }}>Roster File</label>
-            <div onClick={() => fileRef.current.click()}
-              style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${file ? "#22c55e" : "#334155"}`, background: "#1e293b", color: file ? "#22c55e" : "#64748b", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 16 }}>{file ? "✓" : "📂"}</span>
-              <span>{file ? file.name : "Choose CSV or Excel file…"}</span>
-            </div>
-            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv,.txt" style={{ display: "none" }} onChange={handleFile} />
-          </div>
-        )}
-
-        {error && (
-          <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12, padding: "8px 12px", background: "rgba(239,68,68,0.08)", borderRadius: 6 }}>{error}</div>
-        )}
+        {error && <div style={{ fontSize: 12, color: "#f87171", marginBottom: 12, padding: "8px 12px", background: "rgba(239,68,68,0.08)", borderRadius: 6 }}>{error}</div>}
 
         <button onClick={handleStart} disabled={loading}
           style={{ width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: loading ? "wait" : "pointer", opacity: loading ? 0.7 : 1 }}>
           {loading ? "Loading…" : "Start Session →"}
         </button>
-
         <button onClick={onAdmin}
           style={{ width: "100%", marginTop: 10, padding: "10px", borderRadius: 10, border: "1px solid #334155", background: "transparent", color: "#64748b", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
           🔐 Admin Panel
@@ -723,7 +744,8 @@ function BinSetupModal({ binMap, onConfirm }) {
 }
 
 // ── Roster complete modal ─────────────────────────────────────────────────────
-function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismiss }) {
+function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismiss, onNewOrder }) {
+  const extraCount = roster.filter(r => r._extra).length;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #22c55e", padding: 40, maxWidth: 480, width: "90vw", textAlign: "center", position: "relative" }}>
@@ -734,12 +756,16 @@ function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismi
         {flagCount > 0 && (
           <div style={{ fontSize: 14, color: "#f87171", marginBottom: 6 }}>⚠ {flagCount} flagged item{flagCount > 1 ? "s" : ""} require attention.</div>
         )}
+        {extraCount > 0 && (
+          <div style={{ fontSize: 14, color: "#f59e0b", marginBottom: 6 }}>➕ {extraCount} extra jersey{extraCount > 1 ? "s" : ""} not in roster.</div>
+        )}
         <div style={{ fontSize: 13, color: "#64748b", marginBottom: 28 }}>Please review the roster before exporting.</div>
         <div style={{ display: "flex", justifyContent: "center", gap: 24, marginBottom: 28 }}>
           {[
             { label: "Passed",   value: roster.filter(r => r.scanned === "pass").length,     color: "#22c55e" },
             { label: "Flagged",  value: roster.filter(r => r.scanned === "flag").length,     color: "#ef4444" },
             { label: "Resolved", value: roster.filter(r => r.scanned === "resolved").length, color: "#94a3b8" },
+            ...(extraCount > 0 ? [{ label: "Extra", value: extraCount, color: "#f59e0b" }] : []),
           ].map(s => (
             <div key={s.label}>
               <div style={{ fontSize: 32, fontWeight: 900, color: s.color }}>{s.value}</div>
@@ -747,9 +773,10 @@ function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismi
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-          <button onClick={onExport}  style={{ ...btnPri, fontSize: 15, padding: "12px 28px", background: "#22c55e" }}>⬇ Export to Excel</button>
-          <button onClick={onDismiss} style={{ ...btnGhost, fontSize: 14, padding: "12px 20px" }}>Review first</button>
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+          <button onClick={onExport}   style={{ ...btnPri, fontSize: 15, padding: "12px 28px", background: "#22c55e" }}>⬇ Export to Excel</button>
+          <button onClick={onNewOrder} style={{ ...btnPri, fontSize: 14, padding: "12px 20px", background: "#3b82f6" }}>→ Next Order</button>
+          <button onClick={onDismiss}  style={{ ...btnGhost, fontSize: 14, padding: "12px 20px" }}>Review first</button>
         </div>
       </div>
     </div>
@@ -934,11 +961,11 @@ function AdminDashboard({ stations, packGroups, onRefresh }) {
                     <span style={{ color: "#22c55e" }}>✓ {p.passCount}</span>
                     <span style={{ color: "#ef4444" }}>⚑ {p.flagCount}</span>
                   </div>
-                  {s.assigned && <div style={{ marginTop: 8, fontSize: 11, color: "#f59e0b", fontWeight: 600 }}>⏳ Roster assigned — waiting for operator</div>}
+                  {s.assignedQueue?.length > 0 && <div style={{ marginTop: 8, fontSize: 11, color: "#f59e0b", fontWeight: 600 }}>⏳ {s.assignedQueue.length} order{s.assignedQueue.length > 1 ? "s" : ""} queued</div>}
                 </>
               ) : (
                 <div style={{ fontSize: 12, color: "#475569" }}>
-                  {s.assigned ? <span style={{ color: "#f59e0b", fontWeight: 600 }}>⏳ Roster assigned — waiting for operator</span> : "No active session"}
+                  {s.assignedQueue?.length > 0 ? <span style={{ color: "#f59e0b", fontWeight: 600 }}>⏳ {s.assignedQueue.length} order{s.assignedQueue.length > 1 ? "s" : ""} queued — waiting for operator</span> : "No active session"}
                 </div>
               )}
               {s.lastSeen && <div style={{ fontSize: 10, color: "#334155", marginTop: 8 }}>Last seen: {new Date(s.lastSeen).toLocaleTimeString()}</div>}
@@ -1113,7 +1140,7 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
       const allRows = orders.flatMap(o => o.roster.map(r => ({ ...r, _orderNumber: o.orderNumber, _operator: o.operatorName, _binNum: pg.binMap?.[r.team] || 999 })));
       allRows.sort((a, b) => a._binNum - b._binNum || (a.team||"").localeCompare(b.team||"") || (a.name||"").localeCompare(b.name||""));
       const cols = ["Order #", "Bin", "Team", "Name", "Number", "Size", "Status", "Issue", "Operator"];
-      const combinedData = [cols, ...allRows.map(r => [r._orderNumber, r._binNum < 999 ? `Bin ${r._binNum}` : "—", r.team||"", r.name||"", r.number||"", r.size||"", r.scanned==="pass"?"PASS":r.scanned==="flag"?"FLAGGED":r.scanned==="resolved"?"RESOLVED":"NOT SCANNED", r.comment||"", r._operator])];
+      const combinedData = [cols, ...allRows.map(r => [r._orderNumber, r._binNum < 999 ? `Bin ${r._binNum}` : "—", r.team||"", r.name||"", r.number||"", r.size||"", r.scanned==="pass"?"PASS":r.scanned==="flag"?"FLAGGED":r.scanned==="resolved"?"RESOLVED":r.scanned==="extra"?"EXTRA (NOT IN ROSTER)":"NOT SCANNED", r.comment||"", r._operator])];
       window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(combinedData), "Combined Roster");
       window.XLSX.writeFile(wb, `packgroup_${pg.name.replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`);
     } catch (err) { alert("Export failed: " + err.message); }
@@ -1676,13 +1703,13 @@ export default function App() {
           xlsxReady={xlsxReady}
           preAssigned={preAssigned}
           onAdmin={() => setShowAdmin(true)}
-          onStart={({ roster, orderNumber, operatorName, rosterFile, packGroupId, binMap }) => {
+          onStart={({ roster, orderNumber, operatorName, rosterFile, packGroupId, binMap, acceptedOrderNumber }) => {
             applyRoster(roster, rosterFile, binMap, packGroupId);
             setOrderNumber(orderNumber);
             setOperatorName(operatorName);
             setSessionStarted(true);
-            if (preAssigned && stationName) {
-              fetch('/api/station/roster-accepted', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stationId: stationName }) }).catch(() => {});
+            if (acceptedOrderNumber && stationName) {
+              fetch('/api/station/roster-accepted', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stationId: stationName, orderNumber: acceptedOrderNumber }) }).catch(() => {});
               setPreAssigned(null);
             }
           }}
@@ -1729,6 +1756,7 @@ export default function App() {
           flagCount={flagCount}
           onExport={() => { handleExportAndSave(roster, orderNumber, operatorName, binMap, packGroupId); setShowRosterComplete(false); }}
           onDismiss={() => setShowRosterComplete(false)}
+          onNewOrder={handleNewSession}
         />
       )}
 
