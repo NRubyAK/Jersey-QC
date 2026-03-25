@@ -285,7 +285,7 @@ function Kbd({ light, children }) {
 }
 
 // ── Session start modal ───────────────────────────────────────────────────────
-function SessionStartModal({ onStart, xlsxReady, preAssigned }) {
+function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
   const [order,    setOrder]    = useState(preAssigned?.orderNumber || "");
   const [operator, setOperator] = useState("");
   const [file,     setFile]     = useState(null);
@@ -365,6 +365,11 @@ function SessionStartModal({ onStart, xlsxReady, preAssigned }) {
         <button onClick={handleStart} disabled={loading}
           style={{ width: "100%", padding: "13px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 16, cursor: loading ? "wait" : "pointer", opacity: loading ? 0.7 : 1 }}>
           {loading ? "Loading…" : "Start Session →"}
+        </button>
+
+        <button onClick={onAdmin}
+          style={{ width: "100%", marginTop: 10, padding: "10px", borderRadius: 10, border: "1px solid #334155", background: "transparent", color: "#64748b", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+          🔐 Admin Panel
         </button>
       </div>
     </div>
@@ -1670,6 +1675,7 @@ export default function App() {
         <SessionStartModal
           xlsxReady={xlsxReady}
           preAssigned={preAssigned}
+          onAdmin={() => setShowAdmin(true)}
           onStart={({ roster, orderNumber, operatorName, rosterFile, packGroupId, binMap }) => {
             applyRoster(roster, rosterFile, binMap, packGroupId);
             setOrderNumber(orderNumber);
