@@ -85,7 +85,7 @@ app.post('/api/station/complete', (req, res) => {
 
   // Update export index
   const idx = rj(XIDX, []);
-  idx.unshift({ id, stationId, stationName, orderNumber, operatorName, completedAt, rosterCount: roster.length, passCount: roster.filter(r => r.scanned === 'pass').length, packGroupId: packGroupId || null });
+  idx.unshift({ id, stationId, stationName, orderNumber, operatorName, completedAt, rosterCount: roster.filter(r => !r._extra).length, passCount: roster.filter(r => r.scanned === 'pass').length, extraCount: roster.filter(r => r._extra).length, packGroupId: packGroupId || null });
   wj(XIDX, idx);
 
   // Attach to pack group if applicable

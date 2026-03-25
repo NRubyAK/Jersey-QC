@@ -7,6 +7,7 @@ const CLAUDE_API_KEY = import.meta.env.VITE_CLAUDE_API_KEY;
 const S_PASS    = "pass";
 const S_FLAGGED = "flagged";
 const S_MANUAL  = "manual";
+const S_EXTRA   = "extra";
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
 function playTone(type) {
@@ -183,7 +184,7 @@ function clearSession() {
 // ── Exports ───────────────────────────────────────────────────────────────────
 function exportRosterXLSX(roster, orderNumber, operatorName, binMap) {
   if (!window.XLSX) { alert("Excel library not loaded yet, please try again."); return; }
-  const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned" && k !== "comment");
+  const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "_extra" && k !== "scanned" && k !== "comment");
   const hasBins = binMap && Object.keys(binMap).length > 0;
   const data = [
     ["Order Number", orderNumber  || "—"],
@@ -202,6 +203,7 @@ function exportRosterXLSX(roster, orderNumber, operatorName, binMap) {
     const s = r.scanned === "pass"     ? "PASS"
             : r.scanned === "flag"     ? "FLAGGED"
             : r.scanned === "resolved" ? "RESOLVED"
+            : r.scanned === "extra"    ? "EXTRA (NOT IN ROSTER)"
             : "NOT SCANNED";
     data.push([s, ...cols.map(c => r[c]), ...(hasBins ? [r.team && binMap[r.team] ? `Bin ${binMap[r.team]}` : ""] : []), r.comment || ""]);
   });
@@ -254,6 +256,7 @@ function statusColor(s) {
   if (s === S_PASS)    return "#22c55e";
   if (s === S_FLAGGED) return "#ef4444";
   if (s === S_MANUAL)  return "#94a3b8";
+  if (s === S_EXTRA)   return "#f59e0b";
   return "#64748b";
 }
 
@@ -369,7 +372,7 @@ function SessionStartModal({ onStart, xlsxReady, preAssigned }) {
 }
 
 // ── Scan overlay ──────────────────────────────────────────────────────────────
-function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan, onFlagBadJersey, onDismiss, onAutoScan, binMap, confirmKey, cancelKey }) {
+function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan, onFlagBadJersey, onAddExtra, onDismiss, onAutoScan, binMap, confirmKey, cancelKey }) {
   const [selectedIdx,     setSelectedIdx]     = useState(0);
   const [lastCancelPress, setLastCancelPress] = useState(0);
 
@@ -570,8 +573,11 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
               {state.reason}
             </div>
           )}
-          <div style={{ marginTop: 36, display: "flex", gap: 20 }}>
+          <div style={{ marginTop: 36, display: "flex", gap: 20, flexWrap: "wrap", justifyContent: "center" }}>
             <OverlayBtn color="#ef4444" onClick={onFlagBadScan}>🚩 Flag &amp; continue <Kbd>{formatKey(confirmKey)}</Kbd></OverlayBtn>
+            {state.canAddExtra && (
+              <OverlayBtn color="#f59e0b" onClick={onAddExtra}>➕ Extra jersey — not in roster</OverlayBtn>
+            )}
             <OverlayBtn color="#94a3b8" outline onClick={onEdit}>↩ Retry <Kbd light>{formatKey(cancelKey)}</Kbd></OverlayBtn>
           </div>
         </>
@@ -601,18 +607,21 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
 function ResultCard({ result, onResolve }) {
   const [note, setNote] = useState("");
   const isFlagged = result.status === S_FLAGGED;
+  const isExtra   = result.status === S_EXTRA;
+  const bgColor   = isFlagged ? "rgba(239,68,68,0.06)" : isExtra ? "rgba(245,158,11,0.06)" : "rgba(148,163,184,0.06)";
+  const label     = isFlagged ? "🚩 Flagged" : isExtra ? "➕ Extra jersey" : "🔧 Resolved";
   return (
-    <div style={{ ...card, border: `1px solid ${statusColor(result.status)}`, background: isFlagged ? "rgba(239,68,68,0.06)" : "rgba(148,163,184,0.06)", padding: "12px 14px" }}>
+    <div style={{ ...card, border: `1px solid ${statusColor(result.status)}`, background: bgColor, padding: "12px 14px" }}>
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
         {result.thumb && <img src={result.thumb} alt="" style={{ width: 60, height: 45, objectFit: "cover", borderRadius: 5, flexShrink: 0 }} />}
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(result.status), textTransform: "uppercase", letterSpacing: 1 }}>
-            {isFlagged ? "🚩 Flagged" : "🔧 Resolved"}
+            {label}
           </div>
           <div style={{ fontSize: 15, fontWeight: 700, marginTop: 2 }}>
             #{result.detected?.number || "?"} · {result.detected?.name || "Not detected"}
           </div>
-          {result.reason     && <div style={{ fontSize: 12, color: "#f87171", marginTop: 2 }}>{result.reason}</div>}
+          {result.reason     && <div style={{ fontSize: 12, color: isExtra ? "#fcd34d" : "#f87171", marginTop: 2 }}>{result.reason}</div>}
           {result.resolution && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>Resolution: {result.resolution}</div>}
         </div>
       </div>
@@ -726,7 +735,7 @@ function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismi
         <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
         <div style={{ fontSize: 56, marginBottom: 12 }}>🎉</div>
         <div style={{ fontSize: 28, fontWeight: 900, color: "#22c55e", marginBottom: 8 }}>Order Complete!</div>
-        <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 6 }}>All {roster.length} jerseys have been scanned.</div>
+        <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 6 }}>All {roster.filter(r => !r._extra).length} jerseys have been scanned.</div>
         {flagCount > 0 && (
           <div style={{ fontSize: 14, color: "#f87171", marginBottom: 6 }}>⚠ {flagCount} flagged item{flagCount > 1 ? "s" : ""} require attention.</div>
         )}
@@ -1235,7 +1244,7 @@ function AdminExports({ exports, packGroups, api }) {
               <td style={{ padding: "8px 10px", color: "#94a3b8" }}>{e.stationName || "—"}</td>
               <td style={{ padding: "8px 10px", color: "#60a5fa" }}>{e.packGroupId ? (packGroups.find(p => p.id === e.packGroupId)?.name || "—") : "—"}</td>
               <td style={{ padding: "8px 10px", color: "#64748b" }}>{new Date(e.completedAt).toLocaleString()}</td>
-              <td style={{ padding: "8px 10px", color: "#64748b" }}>{e.rosterCount}</td>
+              <td style={{ padding: "8px 10px", color: "#64748b" }}>{e.rosterCount}{e.extraCount > 0 ? <span style={{ color: "#f59e0b", marginLeft: 4, fontWeight: 700 }}>+{e.extraCount}</span> : null}</td>
               <td style={{ padding: "8px 10px" }}>
                 <button onClick={() => downloadExport(e.id)} style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>⬇ Excel</button>
               </td>
@@ -1288,16 +1297,19 @@ export default function App() {
   const [packGroupId,        setPackGroupId]        = useState(_s?.packGroupId       ?? null);
   const [now,                setNow]                = useState(Date.now());
 
+  const extraEntries   = roster.filter(r => r._extra);
+  const extraCount     = extraEntries.length;
+  const origRoster     = roster.filter(r => !r._extra);
   const scanned        = roster.filter(r => r.scanned && r.scanned !== false);
-  const remaining      = roster.filter(r => !r.scanned || r.scanned === false).length;
+  const remaining      = origRoster.filter(r => !r.scanned || r.scanned === false).length;
   const passCount      = log.filter(l => l.status === S_PASS).length;
   const flagCount      = log.filter(l => l.status === S_FLAGGED).length;
   const resolvedCount  = log.filter(l => l.status === S_MANUAL).length;
-  const rosterComplete = roster.length > 0 && remaining === 0;
+  const rosterComplete = origRoster.length > 0 && remaining === 0;
   const elapsedMin     = firstScanTime ? (now - firstScanTime) / 60000 : 0;
   const scanRate       = elapsedMin > 1 && passCount > 0 ? passCount / elapsedMin : null;
   const etaMin         = scanRate && remaining > 0 ? Math.ceil(remaining / scanRate) : null;
-  const rosterCols     = roster.length > 0 ? Object.keys(roster[0]).filter(k => k !== "_id" && k !== "scanned" && k !== "comment") : [];
+  const rosterCols     = roster.length > 0 ? Object.keys(roster[0]).filter(k => k !== "_id" && k !== "_extra" && k !== "scanned" && k !== "comment") : [];
   const keyLabel       = formatKey(scanKey);
 
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
@@ -1333,7 +1345,7 @@ export default function App() {
       const passCount = log.filter(l => l.status === S_PASS).length;
       const flagCount = log.filter(l => l.status === S_FLAGGED).length;
       fetch('/api/station/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stationId: stationName, stationName, progress: { orderNumber, operatorName, rosterCount: roster.length, scanned, passCount, flagCount, packGroupId, lastScan: Date.now() } }),
+        body: JSON.stringify({ stationId: stationName, stationName, progress: { orderNumber, operatorName, rosterCount: roster.filter(r => !r._extra).length, scanned, passCount, flagCount, packGroupId, lastScan: Date.now() } }),
       }).catch(() => {});
     }, 2000);
     return () => clearTimeout(heartbeatTimer.current);
@@ -1459,12 +1471,12 @@ export default function App() {
 
     setScanning(false);
     const scanObj  = { id: Date.now(), detected, thumb: dataUrl };
-    const showFlag = (reason) => { setOverlay({ mode: "flag", scan: scanObj, reason }); playTone("flag"); };
+    const showFlag = (reason, opts = {}) => { setOverlay({ mode: "flag", scan: scanObj, reason, ...opts }); playTone("flag"); };
 
     if (apiError)                            { showFlag("API error: " + apiError); return; }
     if (!detected.name && !detected.number) { showFlag("Could not read jersey — no name or number detected. Check lighting and angle."); return; }
 
-    // Duplicate check — if ALL matching roster entries are already scanned, block as double scan.
+    // Duplicate check — if ALL matching roster entries are already scanned, offer double-scan or extra jersey.
     // Handles multiple entries with the same name+number (different team/size).
     if (detected.number && detected.name) {
       const allMatching = roster.filter(r =>
@@ -1473,7 +1485,7 @@ export default function App() {
       );
       if (allMatching.length > 0 && allMatching.every(r => r.scanned && r.scanned !== false)) {
         const count = allMatching.length;
-        showFlag(`⚠ Double scan — all ${count} entr${count === 1 ? "y" : "ies"} for #${detected.number} · ${detected.name} already scanned.`);
+        showFlag(`⚠ Double scan — all ${count} entr${count === 1 ? "y" : "ies"} for #${detected.number} · ${detected.name} already scanned. Same jersey, or an extra?`, { canAddExtra: true });
         return;
       }
     }
@@ -1486,7 +1498,7 @@ export default function App() {
     } else if (match.type === "close") {
       setOverlay({ mode: "close", scan: scanObj, candidates: match.candidates });
     } else {
-      showFlag(`"${detected.name || "?"}" #${detected.number || "?"} not found in roster.`);
+      showFlag(`"${detected.name || "?"}" #${detected.number || "?"} not found in roster.`, { canAddExtra: true });
     }
   }, [roster, firstScanTime]);
 
@@ -1576,6 +1588,22 @@ export default function App() {
     setLog(prev => [entry, ...prev]); setLastResult(entry); setOverlay(null); playTone("flag");
   }, [overlay]);
 
+  const handleExtraJersey = useCallback(() => {
+    if (!overlay?.scan) return;
+    const det = overlay.scan.detected;
+    // Build a row with the same column shape as existing roster entries (blank for unknown fields)
+    const baseShape = roster[0]
+      ? Object.fromEntries(Object.keys(roster[0]).filter(k => k !== '_id' && k !== '_extra').map(k => [k, ""]))
+      : {};
+    const newEntry = { ...baseShape, _id: Date.now(), _extra: true, name: det.name || "", number: det.number || "", scanned: S_EXTRA, comment: "" };
+    const logEntry = { id: Date.now() + 1, status: S_EXTRA, detected: det, match: newEntry, timestamp: new Date().toLocaleTimeString(), reason: "Extra jersey — not in roster" };
+    setRoster(prev => [...prev, newEntry]);
+    setLog(prev => [logEntry, ...prev]);
+    setLastResult(logEntry);
+    setOverlay(null);
+    playTone("flag");
+  }, [overlay, roster]);
+
   const handleOverlayDismiss = useCallback(() => { setOverlay(null); }, []);
 
   // ── Manual roster edits ───────────────────────────────────────────────────
@@ -1593,7 +1621,12 @@ export default function App() {
       setLog(prev => [logEntry, ...prev]);
       if (!firstScanTime) setFirstScanTime(Date.now());
     } else if (action === "undo") {
-      setRoster(prev => prev.map(r => r._id === entry._id ? { ...r, scanned: false } : r));
+      if (entry._extra) {
+        // Extra entries were added dynamically — remove them from the roster entirely
+        setRoster(prev => prev.filter(r => r._id !== entry._id));
+      } else {
+        setRoster(prev => prev.map(r => r._id === entry._id ? { ...r, scanned: false } : r));
+      }
       setLog(prev => {
         const idx = prev.findIndex(l => l.match?._id === entry._id);
         return idx === -1 ? prev : [...prev.slice(0, idx), ...prev.slice(idx + 1)];
@@ -1670,6 +1703,7 @@ export default function App() {
           onPickCandidate={handlePickCandidate}
           onFlagBadScan={handleFlagBadScan}
           onFlagBadJersey={handleFlagBadJersey}
+          onAddExtra={handleExtraJersey}
           onDismiss={handleOverlayDismiss}
           onAutoScan={doAutoScan}
           binMap={binMap}
@@ -1730,7 +1764,7 @@ export default function App() {
       {/* Progress bar */}
       {roster.length > 0 && (
         <div style={{ height: 4, background: "#1e293b", flexShrink: 0 }}>
-          <div style={{ height: "100%", background: rosterComplete ? "#22c55e" : "#3b82f6", width: `${(scanned.length / roster.length) * 100}%`, transition: "width 0.4s ease" }} />
+          <div style={{ height: "100%", background: rosterComplete ? "#22c55e" : "#3b82f6", width: `${origRoster.length > 0 ? (scanned.filter(r => !r._extra).length / origRoster.length) * 100 : 0}%`, transition: "width 0.4s ease" }} />
         </div>
       )}
 
@@ -1866,11 +1900,12 @@ export default function App() {
         {/* RIGHT: Info panel */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", borderBottom: "1px solid #21262d", flexShrink: 0 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", borderBottom: "1px solid #21262d", flexShrink: 0 }}>
             {[
-              { label: "Scanned",   value: `${scanned.length} / ${roster.length}`, color: "#e2e8f0" },
+              { label: "Scanned",   value: `${scanned.filter(r => !r._extra).length} / ${origRoster.length}`, color: "#e2e8f0" },
               { label: "Remaining", value: remaining,  color: remaining === 0 ? "#22c55e" : "#f59e0b" },
               { label: "Flagged",   value: flagCount,  color: flagCount  > 0 ? "#ef4444" : "#64748b" },
+              { label: "Extra",     value: extraCount, color: extraCount > 0 ? "#f59e0b" : "#64748b" },
               { label: "ETA",       value: etaMin ? `${etaMin}m` : "—", color: "#64748b" },
             ].map(s => (
               <div key={s.label} style={{ padding: "10px 0", textAlign: "center", borderRight: "1px solid #21262d" }}>
@@ -1883,7 +1918,7 @@ export default function App() {
           <div style={{ display: "flex", borderBottom: "1px solid #21262d", flexShrink: 0 }}>
             {["roster", "log"].map(v => (
               <button key={v} onClick={() => setView(v)} style={{ flex: 1, padding: "8px 0", border: "none", background: "transparent", color: view === v ? "#3b82f6" : "#64748b", fontWeight: 600, fontSize: 12, borderBottom: view === v ? "2px solid #3b82f6" : "2px solid transparent", cursor: "pointer", textTransform: "capitalize" }}>
-                {v === "log" ? `Log (${log.length})` : `Roster (${roster.length})`}
+                {v === "log" ? `Log (${log.length})` : `Roster (${origRoster.length}${extraCount > 0 ? ` +${extraCount} extra` : ""})`}
               </button>
             ))}
             <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px", borderLeft: "1px solid #21262d" }}>
@@ -1917,26 +1952,27 @@ export default function App() {
                     <tbody>
                       {roster.map((r, i) => (
                         <tr key={i} style={{
-                          background: r.scanned === "pass" ? "rgba(34,197,94,0.07)" : r.scanned === "flag" ? "rgba(239,68,68,0.07)" : r.scanned === "resolved" ? "rgba(148,163,184,0.07)" : "transparent",
-                          borderBottom: "1px solid #1e293b",
+                          background: r._extra ? "rgba(245,158,11,0.10)" : r.scanned === "pass" ? "rgba(34,197,94,0.07)" : r.scanned === "flag" ? "rgba(239,68,68,0.07)" : r.scanned === "resolved" ? "rgba(148,163,184,0.07)" : "transparent",
+                          borderBottom: r._extra ? "1px solid rgba(245,158,11,0.25)" : "1px solid #1e293b",
                         }}>
                           <td style={{ ...tdSt, whiteSpace: "nowrap" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                               <span style={{ minWidth: 16, textAlign: "center" }}>
-                                {r.scanned === "pass" ? "✅" : r.scanned === "flag" ? "🚩" : r.scanned === "resolved" ? "🔧" : <span style={{ color: "#475569" }}>—</span>}
+                                {r._extra ? "➕" : r.scanned === "pass" ? "✅" : r.scanned === "flag" ? "🚩" : r.scanned === "resolved" ? "🔧" : <span style={{ color: "#475569" }}>—</span>}
                               </span>
-                              {(!r.scanned || r.scanned === false) && (
+                              {r._extra && <span style={{ fontSize: 9, fontWeight: 800, color: "#f59e0b", letterSpacing: 0.5, textTransform: "uppercase" }}>EXTRA</span>}
+                              {!r._extra && (!r.scanned || r.scanned === false) && (
                                 <button onClick={() => handleRosterEdit(r, "pass")} title="Mark as passed"
                                   style={{ padding: "1px 5px", borderRadius: 4, border: "1px solid rgba(34,197,94,0.4)", background: "rgba(34,197,94,0.1)", color: "#22c55e", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✓</button>
                               )}
-                              {(!r.scanned || r.scanned === false || r.scanned === "flag") && (
+                              {!r._extra && (!r.scanned || r.scanned === false || r.scanned === "flag") && (
                                 <button onClick={() => handleRosterEdit(r, r.scanned === "flag" ? "pass" : "flag")} title={r.scanned === "flag" ? "Mark as passed" : "Mark as flagged"}
                                   style={{ padding: "1px 5px", borderRadius: 4, border: `1px solid ${r.scanned === "flag" ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)"}`, background: r.scanned === "flag" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)", color: r.scanned === "flag" ? "#22c55e" : "#ef4444", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
                                   {r.scanned === "flag" ? "✓" : "🚩"}
                                 </button>
                               )}
                               {r.scanned && r.scanned !== false && (
-                                <button onClick={() => handleRosterEdit(r, "undo")} title="Undo"
+                                <button onClick={() => handleRosterEdit(r, "undo")} title={r._extra ? "Remove extra entry" : "Undo"}
                                   style={{ padding: "1px 5px", borderRadius: 4, border: "1px solid rgba(100,116,139,0.4)", background: "rgba(100,116,139,0.1)", color: "#94a3b8", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>↩</button>
                               )}
                             </div>
