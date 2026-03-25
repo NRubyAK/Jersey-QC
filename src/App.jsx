@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import akLogo from "./assets/logo_1.png";
 
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const CLAUDE_API_KEY = import.meta.env.VITE_CLAUDE_API_KEY;
@@ -317,7 +318,8 @@ function SessionStartModal({ onStart, xlsxReady }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#0d1117", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 420, maxWidth: "90vw" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "1px solid #21262d", padding: 40, width: 420, maxWidth: "90vw", position: "relative" }}>
+        <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
         <div style={{ fontSize: 32, marginBottom: 8, textAlign: "center" }}>🏭</div>
         <div style={{ fontWeight: 900, fontSize: 22, textAlign: "center", marginBottom: 4 }}>Jersey QC Scanner</div>
         <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 28 }}>Set up your session to begin</div>
@@ -463,6 +465,7 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", userSelect: "none", padding: "20px 0", overflowY: "auto" }}>
+      <img src={akLogo} alt="AK" style={{ position: "absolute", top: 16, left: 20, height: 32, opacity: 0.7 }} />
 
       {/* ── GREEN ── */}
       {(isConfirm || isDone) && match && (
@@ -684,7 +687,8 @@ function BinSetupModal({ binMap, onConfirm }) {
   const entries = Object.entries(binMap).sort((a, b) => a[1] - b[1]);
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #3b82f6", padding: 40, maxWidth: 560, width: "90vw", textAlign: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #3b82f6", padding: 40, maxWidth: 560, width: "90vw", textAlign: "center", position: "relative" }}>
+        <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
         <div style={{ fontSize: 48, marginBottom: 12 }}>🗂️</div>
         <div style={{ fontSize: 26, fontWeight: 900, color: "#60a5fa", marginBottom: 8 }}>Prepare {entries.length} Bins</div>
         <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 24 }}>
@@ -711,7 +715,8 @@ function BinSetupModal({ binMap, onConfirm }) {
 function RosterCompleteModal({ roster, orderNumber, flagCount, onExport, onDismiss }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #22c55e", padding: 40, maxWidth: 480, width: "90vw", textAlign: "center" }}>
+      <div style={{ background: "#161b22", borderRadius: 16, border: "2px solid #22c55e", padding: 40, maxWidth: 480, width: "90vw", textAlign: "center", position: "relative" }}>
+        <img src={akLogo} alt="AK" style={{ position: "absolute", top: 14, left: 16, height: 28, opacity: 0.9 }} />
         <div style={{ fontSize: 56, marginBottom: 12 }}>🎉</div>
         <div style={{ fontSize: 28, fontWeight: 900, color: "#22c55e", marginBottom: 8 }}>Order Complete!</div>
         <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 6 }}>All {roster.length} jerseys have been scanned.</div>
@@ -1147,6 +1152,7 @@ export default function App() {
       {/* Header */}
       <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", padding: "8px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <img src={akLogo} alt="AK" style={{ height: 32, opacity: 0.95 }} />
           <div>
             <div style={{ fontWeight: 800, fontSize: 14 }}>🏭 Jersey QC Scanner</div>
             {rosterFile && (
