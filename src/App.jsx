@@ -1,15 +1,52 @@
+/**
+ * App.jsx — Jersey QC Scanner (entire frontend)
+ *
+ * This is a single-file React component containing all UI and logic.
+ * It is intentionally monolithic for ease of deployment in a factory environment.
+ *
+ * High-level structure:
+ *   1. Utility functions (audio, CSV/Excel parsing, matching logic, exports)
+ *   2. Shared style objects and small UI primitives (Pill, OverlayBtn, Kbd)
+ *   3. Modal/panel components (SessionStartModal, ScanOverlay, SettingsPanel, etc.)
+ *   4. Admin sub-components (AdminDashboard, AdminAssign, AdminPackGroups, AdminExports)
+ *   5. Root App() component — all state, effects, and main layout
+ *
+ * All styles are inline (no CSS modules). The theme is a dark GitHub-like palette:
+ *   Background:  #0d1117  (page)  /  #161b22  (cards)  /  #1e293b  (inputs)
+ *   Borders:     #21262d  (strong)  /  #334155  (subtle)
+ *   Text:        #e2e8f0  (primary)  /  #94a3b8  (secondary)  /  #64748b  (muted)
+ *   Accent:      #3b82f6  (blue / primary action)
+ *   Status:      #22c55e (pass/green)  #ef4444 (flag/red)  #f59e0b (warn/amber)
+ */
+
 import { useState, useRef, useCallback, useEffect } from "react";
 import akLogo from "./assets/logo_1.png";
 
-const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
+// The Claude model used for jersey scanning. Haiku is chosen for speed and cost.
+// To update the model, change this constant — no other changes needed.
+const CLAUDE_MODEL = "claude-haiku-4-5-20251001";
+
+// API key is read from the environment at build time (set in .env.local).
+// It is sent from the browser directly to the Anthropic API via the Vite proxy.
 const CLAUDE_API_KEY = import.meta.env.VITE_CLAUDE_API_KEY;
 
-const S_PASS    = "pass";
-const S_FLAGGED = "flagged";
-const S_MANUAL  = "manual";
-const S_EXTRA   = "extra";
+// Scan status constants — written to roster entries and log records.
+// These are the only valid values for roster[n].scanned.
+const S_PASS    = "pass";     // confirmed match
+const S_FLAGGED = "flagged";  // flagged by operator for review
+const S_MANUAL  = "manual";   // flag was resolved (Accept/Reject/Note)
+const S_EXTRA   = "extra";    // scanned but not in the roster
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
+/**
+ * Plays a short synthesized tone to give the operator instant audio feedback.
+ * Uses the Web Audio API — no external audio files needed.
+ *
+ * @param {"pass"|"flag"|"scan"} type
+ *   "pass"  → ascending two-note chime (good jersey)
+ *   "flag"  → descending two-note tone (problem detected)
+ *   "scan"  → short single beep (scan trigger acknowledged)
+ */
 function playTone(type) {
   try {
     const ctx  = new (window.AudioContext || window.webkitAudioContext)();
@@ -38,8 +75,15 @@ function playTone(type) {
   } catch { /* audio not supported */ }
 }
 
-// ── CSV parser ────────────────────────────────────────────────────────────────
-// Auto-detects comma vs tab delimiter.
+// ── CSV / TSV parser ──────────────────────────────────────────────────────────
+/**
+ * Parses a CSV or TSV string into an array of roster row objects.
+ * Auto-detects the delimiter by counting tabs vs commas in the header row.
+ * Passes rows through normaliseRosterRows() for column name normalisation.
+ *
+ * @param {string} text - Raw file content
+ * @returns {Object[]} Array of row objects with lowercase column keys and a numeric `_id`
+ */
 function parseCSV(text) {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) return [];
@@ -56,6 +100,16 @@ function parseCSV(text) {
 }
 
 // ── Excel parser ──────────────────────────────────────────────────────────────
+/**
+ * Reads the first sheet of an Excel file (.xlsx / .xls) using the SheetJS library
+ * loaded from CDN. Returns a promise that resolves to a normalised roster array.
+ *
+ * SheetJS must be loaded before calling this (the App component dynamically injects
+ * the CDN script tag on mount and tracks readiness with `xlsxReady` state).
+ *
+ * @param {File} file - File object from an <input type="file"> element
+ * @returns {Promise<Object[]>} Resolves to normalised roster rows
+ */
 function parseExcel(file) {
   return new Promise((resolve, reject) => {
     if (!window.XLSX) { reject(new Error("Excel library not loaded yet.")); return; }
@@ -80,8 +134,18 @@ function parseExcel(file) {
 }
 
 // ── Column normalisation ──────────────────────────────────────────────────────
-// Merges "Size Range" + "Size" → "A-XS" / "Y-M" etc.
-// Renames "Team Name" → "team".
+/**
+ * Normalises roster rows from various export formats into a consistent shape.
+ *
+ * Transformations applied:
+ *   - "size range" + "size" columns → merged into a single "size" field (e.g. "A-XS", "Y-M")
+ *     This matches Athletic Knit's ERP export format where size range (Adult/Youth)
+ *     and size (XS/M/L) are separate columns.
+ *   - "team name" column → renamed to "team" (alternate column name from some exports)
+ *
+ * @param {Object[]} rows - Raw parsed rows (already have lowercase keys)
+ * @returns {Object[]} Rows with normalised columns
+ */
 function normaliseRosterRows(rows) {
   if (rows.length === 0) return rows;
   const keys         = Object.keys(rows[0]);
@@ -102,6 +166,18 @@ function normaliseRosterRows(rows) {
 }
 
 // ── Bin assignment ────────────────────────────────────────────────────────────
+/**
+ * Builds a bin map from a roster that has a "team" column.
+ * Teams are sorted alphabetically and assigned bin numbers starting at 1.
+ *
+ * Example: ["Senators", "Leafs"] → { "Leafs": 1, "Senators": 2 }
+ *
+ * The bin map is shown to the operator before scanning starts so they can label
+ * physical bins. It is also printed on the scan overlay and in the Excel export.
+ *
+ * @param {Object[]} roster
+ * @returns {{ [teamName: string]: number }}
+ */
 function buildBinMap(roster) {
   const teams = [...new Set(roster.map(r => r.team).filter(Boolean))].sort();
   const map   = {};
@@ -110,15 +186,54 @@ function buildBinMap(roster) {
 }
 
 // ── Text normalisation ────────────────────────────────────────────────────────
+/**
+ * Strips all non-alphanumeric characters and lowercases a string.
+ * Used to make name/number comparisons robust against spacing, punctuation,
+ * and capitalisation differences between the AI output and roster data.
+ * e.g. "O'Brien" → "obrien", "#42" → "42"
+ *
+ * @param {string} s
+ * @returns {string}
+ */
 function norm(s) { return (s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
 
 // ── Number-only roster detection ──────────────────────────────────────────────
+/**
+ * Returns true if every row in the roster has no name — i.e. this is a number-only
+ * roster (e.g. practice jerseys with no player assignments).
+ * The match logic uses a different path for number-only rosters.
+ *
+ * @param {Object[]} roster
+ * @returns {boolean}
+ */
 function isNumberOnlyRoster(roster) {
   return roster.length > 0 && roster.every(r => !r.name || r.name.trim() === "");
 }
 
 // ── Match logic ───────────────────────────────────────────────────────────────
-// Never auto-confirms when ambiguity exists — always routes to pick screen.
+/**
+ * Finds roster entries that match the name and/or number detected by the AI.
+ * Returns a result object describing the match type so the UI can choose the
+ * correct overlay mode (green confirm, yellow pick, or red flag).
+ *
+ * Design principle: NEVER auto-confirm when ambiguity exists — always route to
+ * the pick screen so the operator makes the final call.
+ *
+ * Match priority order:
+ *   1. Both name AND number match exactly → "exact"
+ *   2. Multiple entries share the same number → "number_conflict" (pick screen)
+ *   3. Only number matched, no name on jersey → "exact" (if unique) or "number_conflict"
+ *   4. Only name matched → "exact" (if unique) or "number_conflict"
+ *   5. Substring / partial match → "close" (yellow screen)
+ *   6. No match → "none" (red screen)
+ *
+ * For number-only rosters (no player names), a separate simpler path is used.
+ *
+ * @param {Object[]} roster - Full roster array
+ * @param {string} name - Player name detected by AI (may be empty)
+ * @param {string} number - Jersey number detected by AI (may be empty)
+ * @returns {{ type: "exact"|"number_conflict"|"size_pick"|"close"|"none", match?: Object, candidates?: Object[] }}
+ */
 function findMatches(roster, name, number) {
   const nName      = norm(name);
   const nNum       = norm(number);
@@ -170,18 +285,58 @@ function findMatches(roster, name, number) {
 }
 
 // ── Session persistence ────────────────────────────────────────────────────────
+/**
+ * Session state is persisted to localStorage so the operator can reload the page
+ * (e.g. after a browser crash) without losing scan progress.
+ *
+ * Persisted fields: sessionStarted, roster (with scanned status), log, orderNumber,
+ *   operatorName, rosterFile, binMap, firstScanTime, packGroupId.
+ *
+ * NOT persisted: thumbnail images (too large for localStorage), camera state,
+ *   overlay state, or any UI-only state.
+ *
+ * The session is cleared when the operator clicks "New Session".
+ */
 const SESSION_KEY = "jerseyqc_session";
+
+/** Load session from localStorage. Returns null if nothing is saved or on error. */
 function loadSession() {
-  try { const r = localStorage.getItem(SESSION_KEY); return r ? JSON.parse(r) : null; } catch { return null; }
-}
-function saveSession(data) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch { /* storage full */ }
-}
-function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable */ }
+  try { const r = localStorage.getItem(SESSION_KEY); return r ? JSON.parse(r) : null; }
+  catch { return null; }
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
+/** Save current session state to localStorage. Silent on storage-full errors. */
+function saveSession(data) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); }
+  catch { /* storage full — session progress not saved this tick */ }
+}
+
+/** Remove the saved session from localStorage. Called on "New Session". */
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); }
+  catch { /* storage unavailable */ }
+}
+
+// ── Excel and CSV exports ──────────────────────────────────────────────────────
+/**
+ * Exports the full roster with scan results to an Excel (.xlsx) file and
+ * triggers a browser download.
+ *
+ * The exported file contains:
+ *   - Header block: order number, operator name, export date
+ *   - Bin assignments section (if binMap is set)
+ *   - One row per roster entry with: Status, all roster columns, Bin, Comment
+ *
+ * Status values in the export:
+ *   PASS / FLAGGED / RESOLVED / EXTRA (NOT IN ROSTER) / NOT SCANNED
+ *
+ * Requires SheetJS to be loaded (window.XLSX must exist).
+ *
+ * @param {Object[]} roster - Full roster array (includes _extra entries)
+ * @param {string} orderNumber
+ * @param {string} operatorName
+ * @param {Object|null} binMap - Team → bin number map, or null if no bins
+ */
 function exportRosterXLSX(roster, orderNumber, operatorName, binMap) {
   if (!window.XLSX) { alert("Excel library not loaded yet, please try again."); return; }
   const cols = Object.keys(roster[0]).filter(k => k !== "_id" && k !== "_extra" && k !== "scanned" && k !== "comment");
@@ -213,6 +368,19 @@ function exportRosterXLSX(roster, orderNumber, operatorName, binMap) {
   window.XLSX.writeFile(wb, `roster_${orderNumber ? orderNumber + "_" : ""}${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
+/**
+ * Exports the scan event log to a CSV file and triggers a browser download.
+ *
+ * Each row in the log CSV represents one scan event with:
+ *   Time, Status, Detected Name, Detected Number, Matched Name, Matched Number,
+ *   Team, Size, Bin, Notes (reason or resolution)
+ *
+ * This is useful for auditing — it records every scan attempt, not just the final roster state.
+ *
+ * @param {Object[]} log - Array of log entry objects
+ * @param {string} orderNumber
+ * @param {Object|null} binMap
+ */
 function exportLogCSV(log, orderNumber, binMap) {
   const header = "Time,Status,Detected Name,Detected Number,Matched Name,Matched Number,Team,Size,Bin,Notes";
   const rows   = log.map(l => [
@@ -229,6 +397,13 @@ function exportLogCSV(log, orderNumber, binMap) {
   a.click();
 }
 
+/**
+ * Converts a KeyboardEvent.code value into a human-readable label for display.
+ * e.g. "KeyB" → "B", "Space" → "Space", "ArrowDown" → "↓"
+ *
+ * @param {string} code - KeyboardEvent.code value
+ * @returns {string}
+ */
 function formatKey(code) {
   const map = {
     ShiftRight: "RShift", ShiftLeft: "LShift",
@@ -243,7 +418,10 @@ function formatKey(code) {
   return code;
 }
 
-// ── Shared styles ─────────────────────────────────────────────────────────────
+// ── Shared style objects ───────────────────────────────────────────────────────
+// Reusable inline style objects spread into JSX elements throughout the app.
+// All styles are inline to keep the component self-contained with no CSS files.
+
 const card     = { background: "#161b22", borderRadius: 10, border: "1px solid #21262d", marginBottom: 10, overflow: "hidden" };
 const btnPri   = { padding: "8px 18px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" };
 const btnGhost = { padding: "6px 12px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontWeight: 600, fontSize: 12, cursor: "pointer" };
@@ -252,6 +430,7 @@ const codeSt   = { background: "#1e293b", padding: "1px 6px", borderRadius: 4, f
 const thSt     = { padding: "6px 8px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5 };
 const tdSt     = { padding: "6px 8px", color: "#e2e8f0", fontSize: 12 };
 
+/** Returns the status indicator colour for a given scan status string. */
 function statusColor(s) {
   if (s === S_PASS)    return "#22c55e";
   if (s === S_FLAGGED) return "#ef4444";
@@ -260,6 +439,7 @@ function statusColor(s) {
   return "#64748b";
 }
 
+/** Small coloured badge used in the header to show pass/flag counts. */
 function Pill({ color, children }) {
   return (
     <span style={{ background: `${color}22`, color, fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 20, border: `1px solid ${color}44` }}>
@@ -268,6 +448,10 @@ function Pill({ color, children }) {
   );
 }
 
+/**
+ * Large action button used on the full-screen scan overlay.
+ * `outline` renders a transparent background (ghost style) instead of a filled button.
+ */
 function OverlayBtn({ color, outline, onClick, children }) {
   return (
     <button onClick={onClick} style={{ padding: "16px 32px", borderRadius: 14, border: `3px solid ${color}`, background: outline ? "transparent" : color, color: outline ? color : "#fff", fontWeight: 800, fontSize: 22, cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
@@ -276,6 +460,10 @@ function OverlayBtn({ color, outline, onClick, children }) {
   );
 }
 
+/**
+ * Keyboard key indicator styled like a physical key.
+ * `light` uses a lighter style for use on coloured overlay backgrounds.
+ */
 function Kbd({ light, children }) {
   return (
     <kbd style={{ background: light ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.3)", border: "2px solid rgba(255,255,255,0.35)", padding: "3px 10px", borderRadius: 6, fontSize: 18, fontFamily: "monospace", fontWeight: 700 }}>
@@ -285,6 +473,22 @@ function Kbd({ light, children }) {
 }
 
 // ── Session start modal ───────────────────────────────────────────────────────
+/**
+ * Full-screen modal shown before each scanning session.
+ *
+ * Two modes:
+ *   1. Admin-assigned queue: if the admin pushed rosters to this station, they appear
+ *      as selectable cards. The operator just picks one and enters their name.
+ *   2. Manual upload: operator enters order number + uploads a roster file themselves.
+ *
+ * The mode switches automatically if assignments arrive after the modal mounts
+ * (heartbeat fires ~1s after page load).
+ *
+ * @param {Function} onStart - Called with { roster, orderNumber, operatorName, rosterFile, packGroupId, binMap, acceptedOrderNumber? }
+ * @param {boolean} xlsxReady - Whether SheetJS has loaded (controls whether Excel upload is enabled)
+ * @param {Object[]|null} preAssigned - Array of admin-assigned orders waiting for this station
+ * @param {Function} onAdmin - Opens the admin panel
+ */
 function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
   const assignments  = Array.isArray(preAssigned) ? preAssigned : (preAssigned ? [preAssigned] : []);
   const hasQueue     = assignments.length > 0;
@@ -407,6 +611,36 @@ function SessionStartModal({ onStart, xlsxReady, preAssigned, onAdmin }) {
 }
 
 // ── Scan overlay ──────────────────────────────────────────────────────────────
+/**
+ * Full-screen overlay shown after each scan. Covers the entire viewport.
+ *
+ * Modes and their colours:
+ *   "confirm" (green)  — exact match found; operator presses confirmKey to accept
+ *   "done"    (green)  — brief flash after confirmation; auto-dismisses after 700ms and triggers next scan
+ *   "pick"    (yellow) — multiple candidates match; operator selects the correct one
+ *   "close"   (yellow) — fuzzy/partial match; operator confirms or flags
+ *   "flag"    (red)    — no match found, API error, or operator flagged the jersey
+ *
+ * Keyboard handling (all keys are configurable):
+ *   confirmKey       — confirm / select highlighted candidate / flag and continue
+ *   cancelKey        — retry (go back to camera) / navigate to next candidate
+ *   double cancelKey — flag as bad jersey (on pick/close screens)
+ *   ArrowUp/Down     — navigate candidate list on pick/close screens
+ *   Enter            — on close screen: mark as bad scan, correct jersey
+ *
+ * @param {{ mode: string, scan: Object, candidates?: Object[], reason?: string, flagTitle?: string, canAddExtra?: boolean }} state
+ * @param {Function} onConfirm - Confirms the current match
+ * @param {Function} onEdit - Dismisses overlay back to camera
+ * @param {Function} onPickCandidate - Selects a specific candidate from the list
+ * @param {Function} onFlagBadScan - Flags the jersey as a problem
+ * @param {Function} onFlagBadJersey - Close-match: scanner misread, but jersey is correct
+ * @param {Function} onAddExtra - Adds jersey as an extra (not in roster)
+ * @param {Function} onDismiss - Closes the overlay
+ * @param {Function} onAutoScan - Triggers the next scan after "done" auto-dismiss
+ * @param {Object|null} binMap - Team→bin map for displaying bin number on green screen
+ * @param {string} confirmKey - KeyboardEvent.code for the confirm action
+ * @param {string} cancelKey - KeyboardEvent.code for the cancel/navigate action
+ */
 function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan, onFlagBadJersey, onAddExtra, onDismiss, onAutoScan, binMap, confirmKey, cancelKey }) {
   const [selectedIdx,     setSelectedIdx]     = useState(0);
   const [lastCancelPress, setLastCancelPress] = useState(0);
@@ -629,6 +863,18 @@ function ScanOverlay({ state, onConfirm, onEdit, onPickCandidate, onFlagBadScan,
 }
 
 // ── Result card ───────────────────────────────────────────────────────────────
+/**
+ * Shows a flagged or extra item below the camera with resolution actions.
+ * Only rendered for the most recent non-pass result while no overlay is showing.
+ *
+ * Flagged items show three resolution buttons:
+ *   ✓ Accept  — marks the jersey as manually verified (passes QC)
+ *   ✗ Reject  — marks the jersey as sent back for rework
+ *   📝 Note   — records the text in the note field as the resolution
+ *
+ * @param {{ id, status, detected, match?, reason?, resolution?, thumb? }} result
+ * @param {Function} onResolve - Called with (logId, resolutionText)
+ */
 function ResultCard({ result, onResolve }) {
   const [note, setNote] = useState("");
   const isFlagged = result.status === S_FLAGGED;
@@ -666,6 +912,19 @@ function ResultCard({ result, onResolve }) {
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────────
+/**
+ * Floating panel for customising keyboard shortcuts.
+ * Three keys are configurable:
+ *   Scan trigger   — takes a photo (default: B)
+ *   Confirm/select — confirms match or picks candidate (default: B)
+ *   Navigate/retry — cycles candidates, retries scan (default: A)
+ *
+ * To change a key, click "Change" then press the desired key.
+ * Changes are applied only when "Save" is clicked.
+ * Escape closes without saving.
+ *
+ * Designed for use with a barcode scanner gun or foot pedal mapped to keyboard keys.
+ */
 function SettingsPanel({ scanKey, confirmKey, cancelKey, onScanKeyChange, onConfirmKeyChange, onCancelKeyChange, onClose }) {
   const [listening,   setListening]   = useState(null); // "scan" | "confirm" | "cancel" | null
   const [tempScan,    setTempScan]    = useState(scanKey);
@@ -724,6 +983,17 @@ function SettingsPanel({ scanKey, confirmKey, cancelKey, onScanKeyChange, onConf
 }
 
 // ── Bin setup modal ───────────────────────────────────────────────────────────
+/**
+ * Pre-scan modal shown once when a roster has multiple teams.
+ * Displays the bin→team assignments so the operator can physically label their bins
+ * before scanning starts. No interactivity beyond the confirm button.
+ *
+ * If an admin-assigned pack group is used, the bin map comes from the pack group
+ * definition (not auto-detected from the roster) and this modal is skipped.
+ *
+ * @param {{ [teamName: string]: number }} binMap
+ * @param {Function} onConfirm - Called when the operator is ready to start scanning
+ */
 function BinSetupModal({ binMap, onConfirm }) {
   const entries = Object.entries(binMap).sort((a, b) => a[1] - b[1]);
   return (
@@ -753,6 +1023,19 @@ function BinSetupModal({ binMap, onConfirm }) {
 }
 
 // ── Roster complete modal ─────────────────────────────────────────────────────
+/**
+ * Celebration modal shown when all items in the roster have been scanned.
+ * Displays a summary (passed / flagged / resolved / extra counts) and offers:
+ *   ⬇ Export to Excel  — downloads roster results + saves to server
+ *   → Next Order       — clears session and returns to session start
+ *   Review first       — dismisses the modal to review flagged items before exporting
+ *
+ * @param {Object[]} roster
+ * @param {number} flagCount - Number of unresolved flagged items (shown as a warning)
+ * @param {Function} onExport
+ * @param {Function} onDismiss
+ * @param {Function} onNewOrder
+ */
 function RosterCompleteModal({ roster, flagCount, onExport, onDismiss, onNewOrder }) {
   const extraCount = roster.filter(r => r._extra).length;
   return (
@@ -793,6 +1076,16 @@ function RosterCompleteModal({ roster, flagCount, onExport, onDismiss, onNewOrde
 }
 
 // ── Station setup modal ───────────────────────────────────────────────────────
+/**
+ * One-time setup modal shown the first time the app is opened on a device.
+ * Prompts for a station name (e.g. "Station 1") and saves it to localStorage.
+ * The station name is used to identify this device in the admin panel and
+ * is sent with every heartbeat so the admin can see which station is which.
+ *
+ * Once set, this modal is never shown again on this device unless localStorage is cleared.
+ *
+ * @param {Function} onSave - Called with the station name string
+ */
 function StationSetupModal({ onSave }) {
   const [name, setName] = useState("");
   return (
@@ -814,6 +1107,22 @@ function StationSetupModal({ onSave }) {
 }
 
 // ── Admin panel ───────────────────────────────────────────────────────────────
+/**
+ * Password-protected supervisor panel. Opens as a full-screen overlay.
+ *
+ * Tabs:
+ *   Dashboard    — Live station cards showing each station's name, operator,
+ *                  order progress, and online/offline status. Auto-refreshes every 5s.
+ *   Assign Roster — Push a roster file + order number to a specific station's queue.
+ *                   The station operator will see it appear on their start screen.
+ *   Pack Groups   — Create and manage pack groups (multi-order combined exports).
+ *   Export History — Browse and re-download all completed order exports.
+ *
+ * The password is checked against the server's ADMIN_PASSWORD on every API call
+ * via the X-Admin-Password header.
+ *
+ * @param {Function} onClose
+ */
 function AdminPanel({ onClose }) {
   const [authed,      setAuthed]      = useState(false);
   const [password,    setPassword]    = useState("");
@@ -922,6 +1231,12 @@ function AdminPanel({ onClose }) {
   );
 }
 
+/**
+ * Admin dashboard tab — shows a grid of station cards.
+ * A station is considered ACTIVE if it sent a heartbeat within the last 2 minutes.
+ * Each card shows: station name, operator, current order, progress bar, pass/flag counts,
+ * and a queued-orders indicator.
+ */
 function AdminDashboard({ stations, packGroups, onRefresh }) {
   // eslint-disable-next-line react-hooks/purity
   const now = Date.now();
@@ -986,6 +1301,15 @@ function AdminDashboard({ stations, packGroups, onRefresh }) {
   );
 }
 
+/**
+ * Admin "Assign Roster" tab.
+ * Lets a supervisor push a roster (+ optional pack group) to a specific station.
+ * The assignment is queued on the server and delivered to the station on its next heartbeat.
+ * Multiple assignments can be queued; the station works through them in order.
+ *
+ * Known stations appear in the dropdown; a "Type a station name" option allows
+ * assigning to a station that hasn't sent a heartbeat yet.
+ */
 function AdminAssign({ stations, packGroups, api, onDone }) {
   const [stationId,   setStationId]   = useState("");
   const [customName,  setCustomName]  = useState("");
@@ -1079,6 +1403,16 @@ function AdminAssign({ stations, packGroups, api, onDone }) {
   );
 }
 
+/**
+ * Admin "Pack Groups" tab.
+ * A pack group links multiple orders that should be physically packed together.
+ * It defines a shared bin→team mapping that overrides per-roster auto-detection.
+ *
+ * Views: list → create (new group) | detail (view linked orders)
+ *
+ * "Combined Export" downloads a single Excel with a Summary sheet and a Combined Roster
+ * sheet containing all orders, sorted by bin number.
+ */
 function AdminPackGroups({ packGroups, api, onDone, password }) {
   const [view,      setView]      = useState("list"); // "list" | "create" | "detail"
   const [detail,    setDetail]    = useState(null);
@@ -1245,6 +1579,11 @@ function AdminPackGroups({ packGroups, api, onDone, password }) {
   );
 }
 
+/**
+ * Admin "Export History" tab.
+ * Lists all completed orders from the server's export index.
+ * Each row has a download button to re-export the full roster as Excel.
+ */
 function AdminExports({ exports, packGroups, api }) {
   const downloadExport = async (id) => {
     try {
@@ -1287,13 +1626,34 @@ function AdminExports({ exports, packGroups, api }) {
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
+/**
+ * Root component. ALL application state lives here.
+ *
+ * State groups:
+ *   Station / admin   — stationName, showStationSetup, showAdmin, preAssigned
+ *   Session           — sessionStarted, roster, rosterFile, orderNumber, operatorName
+ *   Camera / scanning — cameraOn, scanning, inputMode, thumb, overlay
+ *   Results / log     — lastResult, lastConfirmed, log
+ *   UI                — view, error, xlsxReady, showSettings, showRosterComplete, showBinSetup
+ *   Keys              — scanKey, confirmKey, cancelKey
+ *   Bins / packing    — binMap, packGroupId
+ *   Timing            — firstScanTime, now (used for ETA calculation)
+ *
+ * Key effects:
+ *   - Loads SheetJS from CDN on mount
+ *   - Polls server heartbeat every 15s when idle (to receive admin assignments)
+ *   - Reports scan progress to server every 2s (debounced) when scanning
+ *   - Persists session to localStorage on every state change
+ *   - Listens for the scan trigger key globally (except when overlays are shown)
+ */
 export default function App() {
-  const videoRef         = useRef(null);
-  const canvasRef        = useRef(null);
-  const streamRef        = useRef(null);
-  const rosterRef        = useRef(null);
-  const photoRef         = useRef(null);
-  const heartbeatTimer   = useRef(null);
+  // DOM refs
+  const videoRef       = useRef(null);  // <video> element for live camera feed
+  const canvasRef      = useRef(null);  // hidden <canvas> used to capture frames
+  const streamRef      = useRef(null);  // MediaStream from getUserMedia (for cleanup)
+  const rosterRef      = useRef(null);  // hidden <input type="file"> for roster uploads
+  const photoRef       = useRef(null);  // hidden <input type="file"> for photo uploads
+  const heartbeatTimer = useRef(null);  // setTimeout handle for debounced progress heartbeat
   const _s        = useRef(loadSession()).current;
   const [stationName,        setStationName]        = useState(() => localStorage.getItem("jerseyqc_station") || "");
   const [showStationSetup,   setShowStationSetup]   = useState(() => !localStorage.getItem("jerseyqc_station"));
@@ -1400,6 +1760,19 @@ export default function App() {
   }, [remaining, roster.length, firstScanTime]);
 
   // ── Apply roster + build bins ─────────────────────────────────────────────
+  /**
+   * Resets all scan state and loads a new roster.
+   * Called on session start and when the operator replaces the roster mid-session.
+   *
+   * If overrideBinMap is provided (from an admin pack group), it is used directly
+   * and the bin setup modal is skipped. Otherwise, bins are auto-detected from
+   * team names in the roster: if there's more than one team, the bin setup modal is shown.
+   *
+   * @param {Object[]} parsed - Normalised roster rows
+   * @param {string} fileName - Original file name (shown in header)
+   * @param {Object|null} overrideBinMap - Pre-defined bin map from pack group, or null
+   * @param {string|null} pgId - Pack group ID, or null
+   */
   const applyRoster = useCallback((parsed, fileName, overrideBinMap, pgId) => {
     setRoster(parsed.map(r => ({ ...r, scanned: false, comment: "" })));
     setRosterFile(fileName);
@@ -1462,6 +1835,22 @@ export default function App() {
   }, [stationName, log]);
 
   // ── Core scan ─────────────────────────────────────────────────────────────
+  /**
+   * The main scanning function. Sends a JPEG image to Claude Haiku and processes the result.
+   *
+   * Flow:
+   *   1. Records first scan time (for ETA calculation)
+   *   2. Sets scanning=true to disable re-triggering and show "Analysing…" UI
+   *   3. Calls Claude via /api/anthropic/v1/messages with the image as base64
+   *   4. Parses the JSON response to extract { name, number }
+   *   5. Runs findMatches() against the roster
+   *   6. Sets the appropriate overlay mode (confirm/pick/close/flag)
+   *
+   * Error handling: any API error or JSON parse failure results in a red flag overlay.
+   *
+   * @param {string} base64 - JPEG image data (no data: prefix)
+   * @param {string} dataUrl - Full data: URL for thumbnail display in the overlay
+   */
   const doRunScan = useCallback(async (base64, dataUrl) => {
     if (!firstScanTime) setFirstScanTime(Date.now());
     setScanning(true);
@@ -1526,6 +1915,14 @@ export default function App() {
   }, [roster, firstScanTime]);
 
   // ── Camera scan trigger ───────────────────────────────────────────────────
+  /**
+   * Captures the current video frame to a canvas and passes it to doRunScan().
+   * Guards against scanning when: no camera, already scanning, no roster, or in upload mode.
+   *
+   * IMPORTANT: The canvas is rotated 180° before the image is captured.
+   * This is because the physical camera on the scanning rig is mounted upside-down.
+   * If the camera is ever remounted, remove the translate+rotate calls.
+   */
   const doTriggerScan = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || scanning || !cameraOn || roster.length === 0 || inputMode !== "camera") return;
     const video  = videoRef.current;
@@ -1533,6 +1930,7 @@ export default function App() {
     const w = video.videoWidth, h = video.videoHeight;
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext("2d");
+    // Rotate 180° to correct for upside-down camera mounting
     ctx.translate(w / 2, h / 2);
     ctx.rotate(Math.PI);
     ctx.drawImage(video, -w / 2, -h / 2, w, h);
@@ -1577,7 +1975,15 @@ export default function App() {
     } catch (err) { setError("Failed to parse roster: " + err.message); }
   }, [applyRoster]);
 
-  // ── Overlay actions ───────────────────────────────────────────────────────
+  // ── Overlay action handlers ────────────────────────────────────────────────
+  // These functions are passed as props to ScanOverlay and handle every user
+  // action that can occur on the result screen.
+
+  /**
+   * Confirms a matched jersey. Updates the roster entry to "pass", adds a log entry,
+   * and briefly shows the "done" flash before auto-triggering the next scan.
+   * If the matched entry was already scanned, re-routes to the duplicate/extra flag screen.
+   */
   const handleConfirm = useCallback(() => {
     if (!overlay?.scan?.match) return;
     const scan  = overlay.scan;
@@ -1597,25 +2003,43 @@ export default function App() {
     playTone("pass");
   }, [overlay]);
 
+  /** Dismisses the overlay without recording anything — operator retries the scan. */
   const handleEdit = useCallback(() => { setOverlay(null); }, []);
 
+  /** On a pick/close screen, selects a candidate and advances to the green confirm screen. */
   const handlePickCandidate = useCallback((candidate) => {
     if (!overlay?.scan || !candidate) return;
     setOverlay({ mode: "confirm", scan: { ...overlay.scan, match: candidate } });
   }, [overlay]);
 
+  /**
+   * "Bad scan, correct jersey" — the scanner misread the jersey, but the operator
+   * knows which one it is. Flags the item in the log with a note that it was a scan error.
+   * The roster entry is NOT marked as passed (it still shows as flagged for review).
+   */
   const handleFlagBadJersey = useCallback((candidate) => {
     if (!overlay?.scan) return;
     const entry = { ...overlay.scan, id: overlay.scan.id || Date.now(), status: S_FLAGGED, reason: "Bad scan — correct jersey (misread by scanner)", match: candidate, timestamp: new Date().toLocaleTimeString() };
     setLog(prev => [entry, ...prev]); setLastResult(entry); setOverlay(null); playTone("flag");
   }, [overlay]);
 
+  /**
+   * Flags the current scan as a problem jersey and closes the overlay.
+   * Used for: unrecognised jerseys, API failures, explicit operator flags,
+   * and duplicate scans (already-scanned jersey confirmed again).
+   */
   const handleFlagBadScan = useCallback(() => {
     if (!overlay?.scan) return;
     const entry = { ...overlay.scan, id: overlay.scan.id || Date.now(), status: S_FLAGGED, reason: overlay.reason || "Flagged by operator — bad jersey.", timestamp: new Date().toLocaleTimeString() };
     setLog(prev => [entry, ...prev]); setLastResult(entry); setOverlay(null); playTone("flag");
   }, [overlay]);
 
+  /**
+   * Adds a scanned jersey as an "extra" — it's not in the roster but physically exists.
+   * Creates a new roster entry with _extra: true so it shows in the roster table
+   * and is included in the Excel export with "EXTRA (NOT IN ROSTER)" status.
+   * Uses the operator-confirmed identity if available, otherwise falls back to AI detection.
+   */
   const handleExtraJersey = useCallback(() => {
     if (!overlay?.scan) return;
     const det   = overlay.scan.detected;
@@ -1638,9 +2062,20 @@ export default function App() {
     playTone("flag");
   }, [overlay, roster]);
 
+  /** Closes the scan overlay without recording anything (used by the "done" auto-dismiss). */
   const handleOverlayDismiss = useCallback(() => { setOverlay(null); }, []);
 
   // ── Manual roster edits ───────────────────────────────────────────────────
+  /**
+   * Handles direct roster table row actions (the small buttons on each row).
+   * Actions:
+   *   "pass"  — manually mark an entry as passed (e.g. visually verified without scanning)
+   *   "flag"  — manually flag an entry for review
+   *   "undo"  — reset a scanned entry back to unscanned; removes _extra entries entirely
+   *
+   * @param {Object} entry - The roster row object
+   * @param {"pass"|"flag"|"undo"} action
+   */
   const handleRosterEdit = useCallback((entry, action) => {
     if (action === "pass" || action === "flag") {
       const logEntry = {
@@ -1673,6 +2108,15 @@ export default function App() {
   }, []);
 
   // ── Flag resolution ───────────────────────────────────────────────────────
+  /**
+   * Resolves a flagged log entry (called from ResultCard's Accept/Reject/Note buttons).
+   * Updates the log entry's status to S_MANUAL and records the resolution text.
+   * Also updates the corresponding roster entry to "resolved" so it shows correctly
+   * in the roster table and is counted in the export.
+   *
+   * @param {number} logId - The log entry's id field
+   * @param {string} resolution - Human-readable resolution description
+   */
   const resolveFlag = useCallback((logId, resolution) => {
     const entry = log.find(l => l.id === logId);
     setLog(prev => prev.map(l => l.id === logId ? { ...l, status: S_MANUAL, resolution } : l));
@@ -1683,6 +2127,9 @@ export default function App() {
   }, [log]);
 
   // ── Global keyboard: scan trigger only ───────────────────────────────────
+  // This listener only handles the scan key (default: B).
+  // All other overlay keyboard shortcuts are handled inside ScanOverlay's own useEffect.
+  // We skip scanning when: an overlay is showing, a modal is open, or the focus is on a text input.
   useEffect(() => {
     const onKey = (e) => {
       if (overlay || showBinSetup || showRosterComplete || showSettings) return;
