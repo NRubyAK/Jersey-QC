@@ -1864,8 +1864,14 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ base64 }),
       });
-      if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`);
-      // Server returns { name, number } directly — parsing happens server-side
+      if (!resp.ok) {
+        // Extract the error message from the server's JSON response rather than
+        // showing the raw JSON string (which would appear double-wrapped to the operator).
+        let errMsg;
+        try { errMsg = (await resp.json()).error; } catch { errMsg = `API error ${resp.status}`; }
+        throw new Error(errMsg || `API error ${resp.status}`);
+      }
+      // Server returns { name, number } directly — parsing and validation happen server-side
       detected = await resp.json();
     } catch (e) {
       apiError = e.message;

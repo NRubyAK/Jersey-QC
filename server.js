@@ -195,8 +195,15 @@ app.post('/api/scan', async (req, res) => {
 
     // Strip markdown code fences in case the model wraps its response
     const raw      = (data.content || []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
-    const detected = JSON.parse(raw);
-    res.json(detected); // { name, number }
+    const parsed   = JSON.parse(raw);
+
+    // Guard against unexpected Claude output (null, a string, etc.).
+    // Always return a clean { name, number } object so the client never receives
+    // a non-object that would cause a TypeError when accessing .name / .number.
+    if (!parsed || typeof parsed !== 'object') {
+      return res.status(500).json({ error: `Unexpected Claude response: ${raw}` });
+    }
+    res.json({ name: parsed.name || '', number: parsed.number || '' });
 
   } catch (e) {
     console.error('Scan error:', e.message);
