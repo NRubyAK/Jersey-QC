@@ -22,13 +22,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import akLogo from "./assets/logo_1.png";
 
-// The Claude model used for jersey scanning. Haiku is chosen for speed and cost.
-// To update the model, change this constant — no other changes needed.
-const CLAUDE_MODEL = "claude-haiku-4-5-20251001";
-
-// API key is read from the environment at build time (set in .env.local).
-// It is sent from the browser directly to the Anthropic API via the Vite proxy.
-const CLAUDE_API_KEY = import.meta.env.VITE_CLAUDE_API_KEY;
+// NOTE: The Claude model and API key are now configured in server.js.
+// The browser calls /api/scan (Express) which calls Anthropic server-side.
+// This keeps the API key out of the browser's network tab.
 
 // Scan status constants — written to roster entries and log records.
 // These are the only valid values for roster[n].scanned.
@@ -1841,7 +1837,7 @@ export default function App() {
    * Flow:
    *   1. Records first scan time (for ETA calculation)
    *   2. Sets scanning=true to disable re-triggering and show "Analysing…" UI
-   *   3. Calls Claude via /api/anthropic/v1/messages with the image as base64
+   *   3. Posts the image to /api/scan (Express server-side proxy to Claude Haiku)
    *   4. Parses the JSON response to extract { name, number }
    *   5. Runs findMatches() against the roster
    *   6. Sets the appropriate overlay mode (confirm/pick/close/flag)
@@ -1861,31 +1857,16 @@ export default function App() {
     let apiError  = null;
 
     try {
-      const resp = await fetch("/api/anthropic/v1/messages", {
+      // Send the image to the Express server, which calls Claude Haiku server-side.
+      // The API key never leaves the server — it's not in the browser's network tab.
+      const resp = await fetch("/api/scan", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 200,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
-              { type: "text",  text: `This is a photo of the back of a sports jersey in a manufacturing QC environment. Extract the player name and jersey number. Return ONLY valid JSON, no markdown: {"name":"PLAYERNAME","number":"##"}. Use "" if not visible.` },
-            ],
-          }],
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64 }),
       });
       if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`);
-      const data = await resp.json();
-      console.log(`Tokens — input: ${data.usage?.input_tokens}, output: ${data.usage?.output_tokens}`);
-      const raw  = (data.content || []).map(b => b.text || "").join("").replace(/```json|```/g, "").trim();
-      detected   = JSON.parse(raw);
+      // Server returns { name, number } directly — parsing happens server-side
+      detected = await resp.json();
     } catch (e) {
       apiError = e.message;
     }
@@ -1927,14 +1908,24 @@ export default function App() {
     if (!videoRef.current || !canvasRef.current || scanning || !cameraOn || roster.length === 0 || inputMode !== "camera") return;
     const video  = videoRef.current;
     const canvas = canvasRef.current;
-    const w = video.videoWidth, h = video.videoHeight;
-    canvas.width = w; canvas.height = h;
+    const srcW = video.videoWidth, srcH = video.videoHeight;
+
+    // Scale down to max 640px wide before sending to Claude.
+    // Jersey text is easily readable at this resolution and it roughly halves
+    // the token count vs the full 1280px frame, reducing cost and latency.
+    const MAX_W = 640;
+    const scale = Math.min(1, MAX_W / srcW);
+    canvas.width  = Math.round(srcW * scale);
+    canvas.height = Math.round(srcH * scale);
+
     const ctx = canvas.getContext("2d");
     // Rotate 180° to correct for upside-down camera mounting
-    ctx.translate(w / 2, h / 2);
+    ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.rotate(Math.PI);
-    ctx.drawImage(video, -w / 2, -h / 2, w, h);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    ctx.drawImage(video, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+
+    // JPEG quality 0.75 — sufficient for OCR, noticeably smaller than 0.92
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
     doRunScan(dataUrl.split(",")[1], dataUrl);
   }, [scanning, cameraOn, roster.length, inputMode, doRunScan]);
 
@@ -1953,9 +1944,13 @@ export default function App() {
       const img = new Image();
       img.onload = () => {
         const canvas = canvasRef.current;
-        canvas.width = img.width; canvas.height = img.height;
-        canvas.getContext("2d").drawImage(img, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        // Same scaling as camera capture: cap at 640px wide, 0.75 JPEG quality
+        const MAX_W = 640;
+        const scale = Math.min(1, MAX_W / img.width);
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
         doRunScan(dataUrl.split(",")[1], dataUrl);
       };
       img.src = ev.target.result;

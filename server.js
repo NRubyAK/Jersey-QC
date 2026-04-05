@@ -1,15 +1,14 @@
 /**
  * Jersey QC Scanner — Express API Server
  *
- * Runs on port 3001. The Vite dev server proxies:
- *   /api/admin/*   → this server
- *   /api/station/* → this server
+ * Runs on port 3001. The Vite dev server proxies all /api/* requests to this server.
  *
  * Responsibilities:
+ *   - Proxying Claude Haiku API calls server-side (keeps the API key out of the browser)
  *   - Admin authentication (simple shared password)
  *   - Station registration and heartbeat tracking (in-memory, resets on restart)
  *   - Queuing admin-assigned rosters to specific stations
- *   - Persisting completed orders to disk as JSON files
+ *   - Persisting completed orders to disk as JSON files (async, non-blocking)
  *   - Serving export history and pack group data to the admin panel
  *
  * Data is stored as flat JSON files in ./data/:
@@ -26,15 +25,35 @@
  *   1. Add ADMIN_PASSWORD=yourpassword to .env.local
  *   2. Change the line below to: const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Bernard2025';
  *   3. Restart the server
+ *
+ * ENVIRONMENT VARIABLES (loaded from .env.local automatically):
+ *   VITE_CLAUDE_API_KEY  — Anthropic API key (used server-side for /api/scan)
  */
 
 import express from 'express';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, mkdirSync, existsSync } from 'fs';
+import { readFile, writeFile } from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 // ESM equivalent of __dirname
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ── Load .env.local ────────────────────────────────────────────────────────────
+// Parses KEY=VALUE lines from .env.local and adds them to process.env.
+// Only sets variables not already defined — system env vars take precedence.
+// This avoids a dotenv dependency while still supporting local development.
+try {
+  const envLines = readFileSync(join(__dirname, '.env.local'), 'utf8').split(/\r?\n/);
+  for (const line of envLines) {
+    const match = line.match(/^([^#\s][^=]*)=(.*)$/);
+    if (match) {
+      const key = match[1].trim();
+      const val = match[2].trim().replace(/^["']|["']$/g, ''); // strip optional quotes
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  }
+} catch { /* .env.local not found — env vars must be set externally in production */ }
 
 const app  = express();
 const PORT = 3001;
@@ -42,7 +61,10 @@ const PORT = 3001;
 // TODO: Move this to an environment variable (see notes above)
 const ADMIN_PASSWORD = 'Bernard2025';
 
-// Parse JSON bodies up to 30 MB (large rosters + base64 thumbnails can be sizable)
+// The Claude model used for jersey scanning. Haiku is chosen for speed and cost.
+const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+
+// Parse JSON bodies up to 30 MB (large rosters + base64 images can be sizable)
 app.use(express.json({ limit: '30mb' }));
 
 // Allow cross-origin requests so the Vite dev server (port 5173) can call this server (port 3001)
@@ -58,32 +80,37 @@ app.use((req, res, next) => {
 // ── Persistence helpers ────────────────────────────────────────────────────────
 
 // Directory paths for data storage
-const DATA  = join(__dirname, 'data');         // root data folder
-const XDIR  = join(DATA, 'exports');           // one JSON file per completed order
-const PGDIR = join(DATA, 'packgroups');        // one JSON file per pack group
-const XIDX  = join(DATA, 'export-index.json');     // flat array of order summaries
-const PGIDX = join(DATA, 'packgroup-index.json');   // flat array of pack group summaries
+const DATA  = join(__dirname, 'data');             // root data folder
+const XDIR  = join(DATA, 'exports');               // one JSON file per completed order
+const PGDIR = join(DATA, 'packgroups');            // one JSON file per pack group
+const XIDX  = join(DATA, 'export-index.json');         // flat array of order summaries
+const PGIDX = join(DATA, 'packgroup-index.json');       // flat array of pack group summaries
 
-// Ensure all required directories exist on startup
+// Ensure all required directories exist on startup (sync is fine here — runs once)
 [DATA, XDIR, PGDIR].forEach(d => mkdirSync(d, { recursive: true }));
 
 /**
- * Read and parse a JSON file. Returns `def` if the file doesn't exist or is malformed.
+ * Async: Read and parse a JSON file. Returns `def` if the file doesn't exist or is malformed.
+ * Using async I/O so we never block the Node.js event loop while reading files.
+ *
  * @param {string} file - Absolute path to the JSON file
  * @param {*} def - Default value to return on failure
  */
-function rj(file, def = null) {
-  try { return JSON.parse(readFileSync(file, 'utf8')); }
+async function rj(file, def = null) {
+  try { return JSON.parse(await readFile(file, 'utf8')); }
   catch { return def; }
 }
 
 /**
- * Serialize `data` to JSON and write it to `file`. Throws on write failure.
+ * Async: Serialize `data` to JSON and write it to `file`. Throws on write failure.
+ * Using async I/O so file writes don't block the event loop — important when multiple
+ * stations are saving completed orders at the same time.
+ *
  * @param {string} file - Absolute path
  * @param {*} data - Any JSON-serializable value
  */
-function wj(file, data) {
-  try { writeFileSync(file, JSON.stringify(data, null, 2)); }
+async function wj(file, data) {
+  try { await writeFile(file, JSON.stringify(data, null, 2)); }
   catch (e) { console.error('wj failed', file, e.message); throw e; }
 }
 
@@ -112,6 +139,70 @@ function requireAdmin(req, res, next) {
   }
   next();
 }
+
+// ── Scan: Claude Haiku proxy ───────────────────────────────────────────────────
+
+/**
+ * POST /api/scan
+ * Receives a base64-encoded JPEG from the station browser, calls Claude Haiku,
+ * and returns the extracted { name, number } as JSON.
+ *
+ * Keeping the API call server-side means:
+ *   - The Anthropic API key is never exposed in the browser's network tab
+ *   - All stations share one controlled connection point (easier to add rate limiting)
+ *   - The Vite /api/anthropic proxy is no longer needed
+ *
+ * Body:   { base64: string }   — raw JPEG data, no "data:" prefix
+ * Response (success): { name: string, number: string }
+ * Response (error):   { error: string }
+ */
+app.post('/api/scan', async (req, res) => {
+  const { base64 } = req.body;
+  if (!base64) return res.status(400).json({ error: 'base64 image required' });
+
+  const apiKey = process.env.VITE_CLAUDE_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'VITE_CLAUDE_API_KEY not configured on server' });
+
+  try {
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+            { type: 'text',  text: 'This is a photo of the back of a sports jersey in a manufacturing QC environment. Extract the player name and jersey number. Return ONLY valid JSON, no markdown: {"name":"PLAYERNAME","number":"##"}. Use "" if not visible.' },
+          ],
+        }],
+      }),
+    });
+
+    if (!anthropicRes.ok) {
+      const errText = await anthropicRes.text();
+      console.error(`Anthropic API error ${anthropicRes.status}:`, errText);
+      return res.status(anthropicRes.status).json({ error: `API error ${anthropicRes.status}: ${errText}` });
+    }
+
+    const data = await anthropicRes.json();
+    console.log(`Scan — tokens in: ${data.usage?.input_tokens}, out: ${data.usage?.output_tokens}`);
+
+    // Strip markdown code fences in case the model wraps its response
+    const raw      = (data.content || []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
+    const detected = JSON.parse(raw);
+    res.json(detected); // { name, number }
+
+  } catch (e) {
+    console.error('Scan error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── Admin: authentication ──────────────────────────────────────────────────────
 
@@ -227,11 +318,12 @@ app.post('/api/station/roster-accepted', (req, res) => {
  * Called by a station when the operator presses "Export to Excel" at the end of an order.
  * Saves the full order data (roster + scan log) to disk and updates the export index.
  * Also attaches the order to a pack group if one was assigned.
+ * All file operations are async to avoid blocking other stations' requests.
  *
  * Body: { stationId, stationName, orderNumber, operatorName, roster, log, binMap?, packGroupId?, completedAt }
  * Response: { ok: true, id: string }
  */
-app.post('/api/station/complete', (req, res) => {
+app.post('/api/station/complete', async (req, res) => {
   const { stationId, stationName, orderNumber, operatorName, roster, log, binMap, packGroupId, completedAt } = req.body;
   if (!stationId || !Array.isArray(roster) || !Array.isArray(log)) {
     return res.status(400).json({ error: 'stationId, roster, and log required' });
@@ -240,7 +332,7 @@ app.post('/api/station/complete', (req, res) => {
   const id = newId();
   try {
     // Write the full order record to its own file
-    wj(join(XDIR, `${id}.json`), {
+    await wj(join(XDIR, `${id}.json`), {
       id, stationId, stationName, orderNumber, operatorName,
       roster, log, binMap,
       packGroupId: packGroupId || null,
@@ -248,7 +340,7 @@ app.post('/api/station/complete', (req, res) => {
     });
 
     // Prepend a summary entry to the export index (most recent first)
-    const idx = rj(XIDX, []);
+    const idx = await rj(XIDX, []);
     idx.unshift({
       id, stationId, stationName, orderNumber, operatorName, completedAt,
       rosterCount: roster.filter(r => !r._extra).length,
@@ -256,22 +348,22 @@ app.post('/api/station/complete', (req, res) => {
       extraCount:  roster.filter(r => r._extra).length,
       packGroupId: packGroupId || null,
     });
-    wj(XIDX, idx);
+    await wj(XIDX, idx);
 
     // If this order belongs to a pack group, link it
     if (packGroupId) {
       const pgFile = join(PGDIR, `${packGroupId}.json`);
-      const pg = rj(pgFile);
+      const pg = await rj(pgFile);
       if (pg) {
         pg.orderIds = [...(pg.orderIds || []), id];
-        wj(pgFile, pg);
+        await wj(pgFile, pg);
 
         // Update the pack group index's order count
-        const pgIdx = rj(PGIDX, []);
+        const pgIdx = await rj(PGIDX, []);
         const pgEntry = pgIdx.find(p => p.id === packGroupId);
         if (pgEntry) {
           pgEntry.orderCount = pg.orderIds.length;
-          wj(PGIDX, pgIdx);
+          await wj(PGIDX, pgIdx);
         }
       }
     }
@@ -288,18 +380,18 @@ app.post('/api/station/complete', (req, res) => {
  * GET /api/admin/exports  [admin]
  * Returns the export index (array of order summaries, most recent first).
  */
-app.get('/api/admin/exports', requireAdmin, (req, res) => {
-  res.json(rj(XIDX, []));
+app.get('/api/admin/exports', requireAdmin, async (req, res) => {
+  res.json(await rj(XIDX, []));
 });
 
 /**
  * GET /api/admin/exports/:id  [admin]
  * Returns the full data for a single completed order (roster + log + metadata).
  */
-app.get('/api/admin/exports/:id', requireAdmin, (req, res) => {
+app.get('/api/admin/exports/:id', requireAdmin, async (req, res) => {
   const file = join(XDIR, `${req.params.id}.json`);
   if (!existsSync(file)) return res.status(404).json({ error: 'Not found' });
-  res.json(rj(file));
+  res.json(await rj(file));
 });
 
 // ── Admin: pack groups ─────────────────────────────────────────────────────────
@@ -312,8 +404,8 @@ app.get('/api/admin/exports/:id', requireAdmin, (req, res) => {
  * GET /api/admin/packgroups  [admin]
  * Returns the pack group index (array of summaries).
  */
-app.get('/api/admin/packgroups', requireAdmin, (req, res) => {
-  res.json(rj(PGIDX, []));
+app.get('/api/admin/packgroups', requireAdmin, async (req, res) => {
+  res.json(await rj(PGIDX, []));
 });
 
 /**
@@ -321,15 +413,15 @@ app.get('/api/admin/packgroups', requireAdmin, (req, res) => {
  * Creates a new pack group with a name and bin map.
  * Body: { name: string, binMap: { [teamName]: binNumber } }
  */
-app.post('/api/admin/packgroups', requireAdmin, (req, res) => {
+app.post('/api/admin/packgroups', requireAdmin, async (req, res) => {
   const { name, binMap } = req.body;
   const id = newId();
   const pg = { id, name, binMap, orderIds: [], createdAt: Date.now() };
-  wj(join(PGDIR, `${id}.json`), pg);
+  await wj(join(PGDIR, `${id}.json`), pg);
 
-  const idx = rj(PGIDX, []);
+  const idx = await rj(PGIDX, []);
   idx.unshift({ id, name, createdAt: pg.createdAt, orderCount: 0, binMap });
-  wj(PGIDX, idx);
+  await wj(PGIDX, idx);
 
   res.json({ ok: true, id });
 });
@@ -339,14 +431,14 @@ app.post('/api/admin/packgroups', requireAdmin, (req, res) => {
  * Returns a pack group's definition plus metadata for each of its linked orders
  * (looked up from the export index so we don't load full order files).
  */
-app.get('/api/admin/packgroups/:id', requireAdmin, (req, res) => {
+app.get('/api/admin/packgroups/:id', requireAdmin, async (req, res) => {
   const file = join(PGDIR, `${req.params.id}.json`);
   if (!existsSync(file)) return res.status(404).json({ error: 'Not found' });
 
-  const pg   = rj(file);
-  const xIdx = rj(XIDX, []);
+  const pg   = await rj(file);
+  const xIdx = await rj(XIDX, []);
 
-  // Attach order summaries from the export index (avoid loading full export files)
+  // Attach order summaries from the export index (avoids loading full export files)
   pg.orders = (pg.orderIds || [])
     .map(oid => xIdx.find(x => x.id === oid))
     .filter(Boolean);
@@ -359,14 +451,14 @@ app.get('/api/admin/packgroups/:id', requireAdmin, (req, res) => {
  * Returns the pack group definition + full data for ALL linked orders.
  * Used by the frontend to generate the combined multi-order Excel export.
  */
-app.get('/api/admin/packgroups/:id/combined', requireAdmin, (req, res) => {
-  const pg = rj(join(PGDIR, `${req.params.id}.json`));
+app.get('/api/admin/packgroups/:id/combined', requireAdmin, async (req, res) => {
+  const pg = await rj(join(PGDIR, `${req.params.id}.json`));
   if (!pg) return res.status(404).json({ error: 'Not found' });
 
-  // Load each order's full data (may be large for big orders)
-  const orders = (pg.orderIds || [])
-    .map(oid => rj(join(XDIR, `${oid}.json`)))
-    .filter(Boolean);
+  // Load each order's full data in parallel for speed
+  const orders = (await Promise.all(
+    (pg.orderIds || []).map(oid => rj(join(XDIR, `${oid}.json`)))
+  )).filter(Boolean);
 
   res.json({ pg, orders });
 });
@@ -374,4 +466,7 @@ app.get('/api/admin/packgroups/:id/combined', requireAdmin, (req, res) => {
 // ── Start server ───────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Jersey QC server → http://localhost:${PORT}`);
+  if (!process.env.VITE_CLAUDE_API_KEY) {
+    console.warn('WARNING: VITE_CLAUDE_API_KEY is not set — /api/scan will return errors');
+  }
 });

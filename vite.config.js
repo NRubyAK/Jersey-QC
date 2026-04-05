@@ -5,15 +5,12 @@ import basicSsl from '@vitejs/plugin-basic-ssl'
 export default defineConfig({
   plugins: [react(), basicSsl()],
   server: {
-    host: true,
+    host: true, // bind to all network interfaces so other devices on the LAN can connect
     proxy: {
-      '/api/anthropic': {
-        target: 'https://api.anthropic.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/anthropic/, ''),
-      },
-      '/api/admin': { target: 'http://localhost:3001', changeOrigin: true },
-      '/api/station': { target: 'http://localhost:3001', changeOrigin: true },
-    }
-  }
+      // All /api/* requests route to the Express server.
+      // This includes /api/scan (Claude proxy), /api/admin/*, and /api/station/*.
+      // The Anthropic API is no longer called directly from the browser.
+      '/api': { target: 'http://localhost:3001', changeOrigin: true },
+    },
+  },
 })
